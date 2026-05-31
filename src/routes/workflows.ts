@@ -32,6 +32,13 @@ export const createWorkflowRoutes = (args: {
   app.post("/v1/workflows/:workflowName/runs", async (request, reply) => {
     const params = z.object({ workflowName: z.string().min(1) }).parse(request.params)
     const payload = startRunBodySchema.parse(request.body ?? {})
+
+    if (!args.engine.hasWorkflow(params.workflowName)) {
+      throw app.httpErrors.notFound(
+        `Workflow "${params.workflowName}" is not registered`
+      )
+    }
+
     const run = await args.engine.startRun({
       workflowName: params.workflowName,
       payload,
@@ -86,6 +93,13 @@ export const createWorkflowRoutes = (args: {
 
   app.get("/v1/workflows/:workflowName/render", async (request, reply) => {
     const params = z.object({ workflowName: z.string().min(1) }).parse(request.params)
+
+    if (!args.engine.hasWorkflow(params.workflowName)) {
+      throw app.httpErrors.notFound(
+        `Workflow "${params.workflowName}" is not registered`
+      )
+    }
+
     const workflow = args.engine.getWorkflow(params.workflowName)
     const document = renderWorkflowAsMermaid(workflow)
 

@@ -22,6 +22,7 @@ export type WorkflowRunRecord = {
   error: JsonValue | null
   leaseOwner: string | null
   leaseExpiresAt: Date | null
+  availableAt: Date
   createdAt: Date
   updatedAt: Date
   completedAt: Date | null
@@ -63,6 +64,11 @@ export type WorkflowStepAttemptRecord = {
   updatedAt: Date
 }
 
+export type RetryPolicy = {
+  maxAttempts: number
+  backoffMs?: number
+}
+
 export type TaskStepResult = {
   patch?: JsonObject
   transition?: string
@@ -85,12 +91,16 @@ export type StepExecutionContext = {
   input: JsonObject
   context: JsonObject
   now: Date
+  attempt: number
+  idempotencyKey: string
 }
 
 export type TaskStepDefinition = {
   kind: "task"
   label?: string
   next?: string
+  transitions?: Record<string, string>
+  retry?: RetryPolicy
   run: (context: StepExecutionContext) => Promise<TaskStepResult> | TaskStepResult
 }
 
@@ -98,6 +108,7 @@ export type WaitStepDefinition = {
   kind: "wait"
   label?: string
   next?: string
+  transitions?: Record<string, string>
   open: (
     context: StepExecutionContext
   ) => Promise<WaitStepOpenResult> | WaitStepOpenResult
@@ -105,6 +116,17 @@ export type WaitStepDefinition = {
     context: StepExecutionContext,
     payload: JsonValue | undefined
   ) => Promise<WaitStepResumeResult> | WaitStepResumeResult
+}
+
+export type SleepStepDefinition = {
+  kind: "sleep"
+  label?: string
+  next: string
+  until:
+    | Date
+    | string
+    | number
+    | ((context: StepExecutionContext) => Date | string | number)
 }
 
 export type EndStepDefinition = {
@@ -115,6 +137,7 @@ export type EndStepDefinition = {
 export type WorkflowStepDefinition =
   | TaskStepDefinition
   | WaitStepDefinition
+  | SleepStepDefinition
   | EndStepDefinition
 
 export type WorkflowDefinition = {

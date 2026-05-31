@@ -1,8 +1,10 @@
 import type {
   EndStepDefinition,
+  SleepStepDefinition,
   TaskStepDefinition,
   WaitStepDefinition,
   WorkflowDefinition,
+  WorkflowStepDefinition,
 } from "../types/workflow.js"
 
 export const taskStep = (definition: TaskStepDefinition): TaskStepDefinition =>
@@ -11,13 +13,63 @@ export const taskStep = (definition: TaskStepDefinition): TaskStepDefinition =>
 export const waitStep = (definition: WaitStepDefinition): WaitStepDefinition =>
   definition
 
-export const endStep = (definition: Omit<EndStepDefinition, "kind"> = {}): EndStepDefinition => ({
+export const sleepStep = (
+  definition: SleepStepDefinition
+): SleepStepDefinition => definition
+
+export const endStep = (
+  definition: Omit<EndStepDefinition, "kind"> = {}
+): EndStepDefinition => ({
   kind: "end",
   ...definition,
 })
 
-export const defineWorkflow = (definition: WorkflowDefinition): WorkflowDefinition =>
-  definition
+const getStaticTargets = (step: WorkflowStepDefinition) => {
+  const targets = new Set<string>()
+
+  if ("next" in step && typeof step.next === "string") {
+    targets.add(step.next)
+  }
+
+  if ("transitions" in step && step.transitions) {
+    for (const target of Object.values(step.transitions)) {
+      targets.add(target)
+    }
+  }
+
+  return [...targets]
+}
+
+const validateWorkflowDefinition = (workflow: WorkflowDefinition) => {
+  if (!workflow.steps[workflow.startAt]) {
+    throw new Error(
+      `Workflow "${workflow.name}" start step "${workflow.startAt}" is missing`
+    )
+  }
+
+  for (const [stepKey, step] of Object.entries(workflow.steps)) {
+    for (const target of getStaticTargets(step)) {
+      if (!workflow.steps[target]) {
+        throw new Error(
+          `Workflow "${workflow.name}" step "${stepKey}" references missing target "${target}"`
+        )
+      }
+    }
+
+    if (step.kind !== "end" && step.kind !== "sleep") {
+      if (!step.next && !step.transitions) {
+        throw new Error(
+          `Workflow "${workflow.name}" step "${stepKey}" must define next or transitions`
+        )
+      }
+    }
+  }
+}
+
+export const defineWorkflow = (definition: WorkflowDefinition): WorkflowDefinition => {
+  validateWorkflowDefinition(definition)
+  return definition
+}
 
 const formatLabel = (workflow: WorkflowDefinition, stepKey: string) => {
   const step = workflow.steps[stepKey]
@@ -29,13 +81,9 @@ const formatLabel = (workflow: WorkflowDefinition, stepKey: string) => {
 }
 
 const getEdges = (workflow: WorkflowDefinition) =>
-  Object.entries(workflow.steps).flatMap(([stepKey, step]) => {
-    if (step.kind === "end" || !step.next) {
-      return []
-    }
-
-    return [{ from: stepKey, to: step.next }]
-  })
+  Object.entries(workflow.steps).flatMap(([stepKey, step]) =>
+    getStaticTargets(step).map((to) => ({ from: stepKey, to }))
+  )
 
 export const renderWorkflowAsMermaid = (workflow: WorkflowDefinition) => {
   const lines = ["flowchart TD"]
@@ -50,6 +98,11 @@ export const renderWorkflowAsMermaid = (workflow: WorkflowDefinition) => {
 
     if (step.kind === "wait") {
       lines.push(`  ${stepKey}{{"${label}"}}`)
+      continue
+    }
+
+    if (step.kind === "sleep") {
+      lines.push(`  ${stepKey}[[\"${label}\"]]`)
       continue
     }
 

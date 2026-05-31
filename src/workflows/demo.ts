@@ -1,6 +1,12 @@
 import { createHash } from "node:crypto"
 
-import { defineWorkflow, endStep, taskStep, waitStep } from "../lib/workflow-definition.js"
+import {
+  defineWorkflow,
+  endStep,
+  sleepStep,
+  taskStep,
+  waitStep,
+} from "../lib/workflow-definition.js"
 
 const createCorrelationKey = (value: string) =>
   createHash("sha256").update(value).digest("hex").slice(0, 24)
@@ -14,6 +20,11 @@ export const demoWorkflow = defineWorkflow({
     "classify-recipient": taskStep({
       kind: "task",
       label: "Classify recipient",
+      transitions: {
+        email: "send-email",
+        sms: "send-sms",
+        webhook: "send-webhook",
+      },
       run: ({ input }) => {
         const recipientType =
           typeof input.email === "string"
@@ -37,6 +48,10 @@ export const demoWorkflow = defineWorkflow({
       kind: "task",
       label: "Send email",
       next: "delivery-confirmation",
+      retry: {
+        maxAttempts: 3,
+        backoffMs: 1_000,
+      },
       run: ({ input }) => ({
         patch: {
           provider: "email",
@@ -53,6 +68,10 @@ export const demoWorkflow = defineWorkflow({
       kind: "task",
       label: "Send SMS",
       next: "delivery-confirmation",
+      retry: {
+        maxAttempts: 3,
+        backoffMs: 1_000,
+      },
       run: ({ input }) => ({
         patch: {
           provider: "sms",
@@ -68,7 +87,11 @@ export const demoWorkflow = defineWorkflow({
     "send-webhook": taskStep({
       kind: "task",
       label: "Send webhook",
-      next: "delivery-confirmation",
+      next: "cooldown",
+      retry: {
+        maxAttempts: 3,
+        backoffMs: 1_000,
+      },
       run: ({ input }) => ({
         patch: {
           provider: "webhook",
@@ -80,6 +103,12 @@ export const demoWorkflow = defineWorkflow({
           accepted: true,
         },
       }),
+    }),
+    cooldown: sleepStep({
+      kind: "sleep",
+      label: "Cooldown",
+      next: "delivery-confirmation",
+      until: 5_000,
     }),
     "delivery-confirmation": waitStep({
       kind: "wait",

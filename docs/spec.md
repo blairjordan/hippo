@@ -121,8 +121,8 @@ Hippo v1 should provide:
 
 - At-least-once step execution
 - Durable retries
-- Idempotency keys for external side effects
-- Duplicate detection for replayed or retried work
+- Stable step-scoped idempotency keys for external side effects
+- Duplicate-resistant callback resumption
 
 ### Worker Behavior
 
@@ -200,15 +200,10 @@ Hippo should use Postgres as the primary backend.
 
 ### Required Tables
 
-- `workflow_definitions`
 - `workflow_runs`
-- `workflow_steps`
-- `step_attempts`
+- `workflow_step_attempts`
 - `workflow_events`
-- `workflow_leases`
-- `callback_waits`
-- `scheduled_tasks`
-- `idempotency_keys`
+- `workflow_waits`
 
 ### Storage Principles
 
@@ -225,7 +220,7 @@ Hippo should have a recovery loop that periodically:
 - Finds expired leases
 - Requeues orphaned runnable work
 - Detects stuck runs
-- Promotes due timer steps
+- Promotes due timer-delayed runs
 - Surfaces dead-lettered runs
 
 This recovery behavior is a core product feature, not an operational add-on.

@@ -35,6 +35,7 @@ CREATE TABLE workflow_runs (
   error JSONB,
   lease_owner TEXT,
   lease_expires_at TIMESTAMPTZ,
+  available_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   completed_at TIMESTAMPTZ
@@ -45,6 +46,9 @@ CREATE INDEX workflow_runs_status_created_at_idx
 
 CREATE INDEX workflow_runs_lease_expires_at_idx
   ON workflow_runs (lease_expires_at);
+
+CREATE INDEX workflow_runs_available_at_idx
+  ON workflow_runs (available_at);
 
 CREATE TABLE workflow_step_attempts (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

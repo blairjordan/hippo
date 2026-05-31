@@ -24,6 +24,9 @@ const main = async () => {
     workerId: config.HIPPO_WORKER_ID,
     pollIntervalMs: config.HIPPO_POLL_INTERVAL_MS,
     leaseMs: config.HIPPO_LEASE_MS,
+    onError: (error) => {
+      app.log.error(error)
+    },
   })
 
   const shutdown = async () => {
@@ -46,4 +49,7 @@ const main = async () => {
   })
 }
 
-void main()
+main().catch((error) => {
+  console.error(error)
+  process.exitCode = 1
+})
