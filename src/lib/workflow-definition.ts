@@ -1,6 +1,7 @@
 import type {
   EndStepDefinition,
   SleepStepDefinition,
+  SignalStepDefinition,
   TaskStepDefinition,
   WaitStepDefinition,
   WorkflowDefinition,
@@ -12,6 +13,10 @@ export const taskStep = (definition: TaskStepDefinition): TaskStepDefinition =>
 
 export const waitStep = (definition: WaitStepDefinition): WaitStepDefinition =>
   definition
+
+export const signalStep = (
+  definition: SignalStepDefinition
+): SignalStepDefinition => definition
 
 export const sleepStep = (
   definition: SleepStepDefinition
@@ -101,8 +106,13 @@ export const renderWorkflowAsMermaid = (workflow: WorkflowDefinition) => {
       continue
     }
 
+    if (step.kind === "signal") {
+      lines.push(`  ${stepKey}{{"${label}"}}`)
+      continue
+    }
+
     if (step.kind === "sleep") {
-      lines.push(`  ${stepKey}[[\"${label}\"]]`)
+      lines.push(`  ${stepKey}[["${label}"]]`)
       continue
     }
 

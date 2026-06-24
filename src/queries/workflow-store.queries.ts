@@ -4,6 +4,7 @@ export type Json = null | boolean | number | string | Json[] | { [key: string]: 
 
 export interface IRunRow {
   id: string
+  parentRunId?: string | null
   definitionName: string
   definitionVersion: number
   status: string
@@ -14,6 +15,8 @@ export interface IRunRow {
   error: Json | null
   leaseOwner: string | null
   leaseExpiresAt: Date | null
+  cancelRequestedAt?: Date | null
+  cancelMode?: string | null
   availableAt: Date
   createdAt: Date
   updatedAt: Date
@@ -30,7 +33,18 @@ export interface IAttemptRow {
   output: Json | null
   error: Json | null
   startedAt: Date
+  lastHeartbeatAt?: Date | null
   completedAt: Date | null
+  createdAt: Date
+  updatedAt: Date
+}
+
+export interface ISignalRow {
+  id: string
+  runId: string
+  signalName: string
+  payload: Json | null
+  consumedAt: Date | null
   createdAt: Date
   updatedAt: Date
 }
@@ -44,6 +58,7 @@ export interface IWaitRow {
   payload: Json | null
   resumePayload: Json | null
   resumeOutput: Json | null
+  expiresAt?: Date | null
   createdAt: Date
   updatedAt: Date
   resumedAt: Date | null
@@ -138,6 +153,28 @@ export const getRunEventsQuery = sql<{
   FROM workflow_events
   WHERE run_id = $runId
   ORDER BY created_at ASC, id ASC
+`
+
+export const getRunAttemptsQuery = sql<{
+  params: { runId: string }
+  result: IAttemptRow
+}>`
+  SELECT
+    id,
+    run_id AS "runId",
+    step_key AS "stepKey",
+    attempt,
+    status,
+    input,
+    output,
+    error,
+    started_at AS "startedAt",
+    completed_at AS "completedAt",
+    created_at AS "createdAt",
+    updated_at AS "updatedAt"
+  FROM workflow_step_attempts
+  WHERE run_id = $runId
+  ORDER BY created_at ASC, attempt ASC
 `
 
 export const insertEventQuery = sql<{
@@ -379,6 +416,7 @@ export const openWaitQuery = sql<{
     context: Json
     correlationKey: string
     payload: Json | null
+    expiresAt: Date | null
     output: Json | null
     eventType: string
     eventPayload: Json
@@ -423,9 +461,10 @@ export const openWaitQuery = sql<{
       step_key,
       correlation_key,
       status,
-      payload
+      payload,
+      expires_at
     )
-    SELECT id, $stepKey, $correlationKey, 'open', $payload
+    SELECT id, $stepKey, $correlationKey, 'open', $payload, $expiresAt
     FROM updated_run
   ), updated_attempt AS (
     UPDATE workflow_step_attempts
@@ -632,6 +671,7 @@ export const getOpenWaitForUpdateQuery = sql<{
     payload,
     resume_payload AS "resumePayload",
     resume_output AS "resumeOutput",
+    expires_at AS "expiresAt",
     created_at AS "createdAt",
     updated_at AS "updatedAt",
     resumed_at AS "resumedAt"
@@ -727,6 +767,38 @@ export const completeWaitResumeQuery = sql<{
   SELECT * FROM updated_run
 `
 
+export const extendLeaseQuery = sql<{
+  params: {
+    runId: string
+    stepKey: string
+    attemptId: string
+    workerId: string
+    leaseMs: number
+  }
+  result: { ok: number }
+}>`
+  WITH updated_run AS (
+    UPDATE workflow_runs
+    SET
+      lease_expires_at = now() + ($leaseMs * interval '1 millisecond'),
+      updated_at = now()
+    WHERE id = $runId
+      AND current_step_key = $stepKey
+      AND lease_owner = $workerId
+      AND lease_expires_at >= now()
+    RETURNING id
+  ), updated_attempt AS (
+    UPDATE workflow_step_attempts
+    SET
+      last_heartbeat_at = now(),
+      updated_at = now()
+    WHERE id = $attemptId
+      AND run_id IN (SELECT id FROM updated_run)
+    RETURNING id
+  )
+  SELECT CASE WHEN EXISTS (SELECT 1 FROM updated_attempt) THEN 1 ELSE 0 END::int AS ok
+`
+
 export const countOpenWaitsQuery = sql<{
   params: void
   result: { waitCount: number }
@@ -734,6 +806,323 @@ export const countOpenWaitsQuery = sql<{
   SELECT COUNT(*)::int AS "waitCount"
   FROM workflow_waits
   WHERE status = 'open'
+`
+
+export const expireOpenWaitsQuery = sql<{
+  params: { limit: number }
+  result: { expiredCount: number }
+}>`
+  WITH expired_waits AS (
+    SELECT id, run_id AS "runId", step_key AS "stepKey"
+    FROM workflow_waits
+    WHERE status = 'open'
+      AND expires_at IS NOT NULL
+      AND expires_at < now()
+    ORDER BY expires_at ASC
+    FOR UPDATE SKIP LOCKED
+    LIMIT $limit
+  ), updated_waits AS (
+    UPDATE workflow_waits
+    SET
+      status = 'expired',
+      updated_at = now()
+    WHERE id IN (SELECT id FROM expired_waits)
+    RETURNING id
+  ), updated_runs AS (
+    UPDATE workflow_runs
+    SET
+      status = 'failed',
+      error = jsonb_build_object('message', 'Wait step expired'),
+      lease_owner = NULL,
+      lease_expires_at = NULL,
+      available_at = now(),
+      updated_at = now(),
+      completed_at = now()
+    WHERE id IN (SELECT "runId" FROM expired_waits)
+      AND status = 'waiting'
+    RETURNING id
+  ), inserted_events AS (
+    INSERT INTO workflow_events (run_id, step_key, event_type, payload)
+    SELECT "runId", "stepKey", 'wait.expired', '{}'::jsonb
+    FROM expired_waits
+  )
+  SELECT COUNT(*)::int AS "expiredCount"
+  FROM updated_waits
+`
+
+export const createSignalQuery = sql<{
+  params: {
+    runId: string
+    signalName: string
+    payload: Json | null
+  }
+  result: { runId: string }
+}>`
+  WITH target_run AS (
+    SELECT id
+    FROM workflow_runs
+    WHERE id = $runId
+  ), inserted_signal AS (
+    INSERT INTO workflow_signals (
+      run_id,
+      signal_name,
+      payload
+    )
+    SELECT id, $signalName, $payload
+    FROM target_run
+    RETURNING run_id AS "runId"
+  ), updated_run AS (
+    UPDATE workflow_runs
+    SET
+      status = CASE WHEN status = 'waiting' THEN 'queued' ELSE status END,
+      available_at = CASE WHEN status = 'waiting' THEN now() ELSE available_at END,
+      updated_at = now()
+    WHERE id = $runId
+    RETURNING id
+  ), inserted_event AS (
+    INSERT INTO workflow_events (run_id, step_key, event_type, payload)
+    SELECT $runId, NULL, 'signal.received', jsonb_build_object('signalName', $signalName)
+    FROM inserted_signal
+  )
+  SELECT "runId" FROM inserted_signal
+`
+
+export const consumeSignalQuery = sql<{
+  params: {
+    runId: string
+    signalName: string
+  }
+  result: ISignalRow
+}>`
+  WITH candidate AS (
+    SELECT id
+    FROM workflow_signals
+    WHERE run_id = $runId
+      AND signal_name = $signalName
+    AND consumed_at IS NULL
+    ORDER BY created_at ASC
+    FOR UPDATE SKIP LOCKED
+    LIMIT 1
+  )
+  UPDATE workflow_signals
+  SET
+    consumed_at = now(),
+    updated_at = now()
+  WHERE id IN (SELECT id FROM candidate)
+  RETURNING
+    id,
+    run_id AS "runId",
+    signal_name AS "signalName",
+    payload,
+    consumed_at AS "consumedAt",
+    created_at AS "createdAt",
+    updated_at AS "updatedAt"
+`
+
+export const listActiveRunsQuery = sql<{
+  params: { limit: number }
+  result: IRunRow
+}>`
+  SELECT
+    id,
+    definition_name AS "definitionName",
+    definition_version AS "definitionVersion",
+    status,
+    current_step_key AS "currentStepKey",
+    input,
+    context,
+    result,
+    error,
+    lease_owner AS "leaseOwner",
+    lease_expires_at AS "leaseExpiresAt",
+    available_at AS "availableAt",
+    created_at AS "createdAt",
+    updated_at AS "updatedAt",
+    completed_at AS "completedAt"
+  FROM workflow_runs
+  WHERE status IN ('queued', 'running', 'waiting')
+  ORDER BY available_at ASC, created_at ASC
+  LIMIT $limit
+`
+
+export const listFailedRunsQuery = sql<{
+  params: { limit: number }
+  result: IRunRow
+}>`
+  SELECT
+    id,
+    definition_name AS "definitionName",
+    definition_version AS "definitionVersion",
+    status,
+    current_step_key AS "currentStepKey",
+    input,
+    context,
+    result,
+    error,
+    lease_owner AS "leaseOwner",
+    lease_expires_at AS "leaseExpiresAt",
+    available_at AS "availableAt",
+    created_at AS "createdAt",
+    updated_at AS "updatedAt",
+    completed_at AS "completedAt"
+  FROM workflow_runs
+  WHERE status = 'failed'
+  ORDER BY completed_at DESC NULLS LAST, updated_at DESC
+  LIMIT $limit
+`
+
+export const listStuckRunsQuery = sql<{
+  params: { limit: number; olderThanMs: number }
+  result: IRunRow
+}>`
+  SELECT
+    id,
+    definition_name AS "definitionName",
+    definition_version AS "definitionVersion",
+    status,
+    current_step_key AS "currentStepKey",
+    input,
+    context,
+    result,
+    error,
+    lease_owner AS "leaseOwner",
+    lease_expires_at AS "leaseExpiresAt",
+    available_at AS "availableAt",
+    created_at AS "createdAt",
+    updated_at AS "updatedAt",
+    completed_at AS "completedAt"
+  FROM workflow_runs
+  WHERE
+    (status = 'running' AND lease_expires_at < now())
+    OR (
+      status = 'waiting'
+      AND updated_at <= now() - ($olderThanMs * interval '1 millisecond')
+    )
+    OR (
+      status = 'queued'
+      AND available_at <= now() - ($olderThanMs * interval '1 millisecond')
+    )
+  ORDER BY updated_at ASC, available_at ASC
+  LIMIT $limit
+`
+
+export const cancelRunQuery = sql<{
+  params: {
+    runId: string
+    eventType: string
+    eventPayload: Json
+  }
+  result: IRunRow
+}>`
+  WITH updated_run AS (
+    UPDATE workflow_runs
+    SET
+      status = 'canceled',
+      lease_owner = NULL,
+      lease_expires_at = NULL,
+      available_at = now(),
+      updated_at = now(),
+      completed_at = now()
+    WHERE id = $runId
+      AND status IN ('queued', 'running', 'waiting', 'failed')
+    RETURNING
+      id,
+      definition_name AS "definitionName",
+      definition_version AS "definitionVersion",
+      status,
+      current_step_key AS "currentStepKey",
+      input,
+      context,
+      result,
+      error,
+      lease_owner AS "leaseOwner",
+      lease_expires_at AS "leaseExpiresAt",
+      available_at AS "availableAt",
+      created_at AS "createdAt",
+      updated_at AS "updatedAt",
+      completed_at AS "completedAt"
+  ), inserted_event AS (
+    INSERT INTO workflow_events (run_id, step_key, event_type, payload)
+    SELECT id, "currentStepKey", $eventType, $eventPayload
+    FROM updated_run
+  )
+  SELECT * FROM updated_run
+`
+
+export const retryRunQuery = sql<{
+  params: {
+    runId: string
+    eventType: string
+    eventPayload: Json
+  }
+  result: IRunRow
+}>`
+  WITH updated_run AS (
+    UPDATE workflow_runs
+    SET
+      status = 'queued',
+      error = NULL,
+      lease_owner = NULL,
+      lease_expires_at = NULL,
+      available_at = now(),
+      updated_at = now(),
+      completed_at = NULL
+    WHERE id = $runId
+      AND status = 'failed'
+      AND current_step_key IS NOT NULL
+    RETURNING
+      id,
+      definition_name AS "definitionName",
+      definition_version AS "definitionVersion",
+      status,
+      current_step_key AS "currentStepKey",
+      input,
+      context,
+      result,
+      error,
+      lease_owner AS "leaseOwner",
+      lease_expires_at AS "leaseExpiresAt",
+      available_at AS "availableAt",
+      created_at AS "createdAt",
+      updated_at AS "updatedAt",
+      completed_at AS "completedAt"
+  ), inserted_event AS (
+    INSERT INTO workflow_events (run_id, step_key, event_type, payload)
+    SELECT id, "currentStepKey", $eventType, $eventPayload
+    FROM updated_run
+  )
+  SELECT * FROM updated_run
+`
+
+export const recoverExpiredLeasesQuery = sql<{
+  params: { limit: number }
+  result: { reclaimedCount: number }
+}>`
+  WITH recovered AS (
+    SELECT id
+    FROM workflow_runs
+    WHERE status = 'running'
+      AND lease_expires_at < now()
+    ORDER BY lease_expires_at ASC
+    FOR UPDATE SKIP LOCKED
+    LIMIT $limit
+  ), updated_runs AS (
+    UPDATE workflow_runs
+    SET
+      status = 'queued',
+      lease_owner = NULL,
+      lease_expires_at = NULL,
+      available_at = now(),
+      updated_at = now()
+    WHERE id IN (SELECT id FROM recovered)
+    RETURNING id, current_step_key AS "currentStepKey"
+  ), inserted_events AS (
+    INSERT INTO workflow_events (run_id, step_key, event_type, payload)
+    SELECT id, "currentStepKey", 'run.recovered', '{}'::jsonb
+    FROM updated_runs
+  )
+  SELECT COUNT(*)::int AS "reclaimedCount"
+  FROM updated_runs
 `
 
 export const pingQuery = sql<{

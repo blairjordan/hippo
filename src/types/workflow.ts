@@ -8,10 +8,13 @@ export type WorkflowRunStatus =
   | "failed"
   | "canceled"
 
+export type WorkflowCancelMode = "graceful" | "hard"
+
 export type StepAttemptStatus = "started" | "completed" | "failed"
 
 export type WorkflowRunRecord = {
   id: string
+  parentRunId: string | null
   definitionName: string
   definitionVersion: number
   status: WorkflowRunStatus
@@ -22,6 +25,8 @@ export type WorkflowRunRecord = {
   error: JsonValue | null
   leaseOwner: string | null
   leaseExpiresAt: Date | null
+  cancelRequestedAt: Date | null
+  cancelMode: WorkflowCancelMode | null
   availableAt: Date
   createdAt: Date
   updatedAt: Date
@@ -46,6 +51,7 @@ export type WorkflowWaitRecord = {
   payload: JsonValue | null
   resumePayload: JsonValue | null
   resumeOutput: JsonValue | null
+  expiresAt: Date | null
   createdAt: Date
   updatedAt: Date
   resumedAt: Date | null
@@ -61,6 +67,7 @@ export type WorkflowStepAttemptRecord = {
   output: JsonValue | null
   error: JsonValue | null
   startedAt: Date
+  lastHeartbeatAt: Date | null
   completedAt: Date | null
   createdAt: Date
   updatedAt: Date
@@ -69,6 +76,7 @@ export type WorkflowStepAttemptRecord = {
 export type RetryPolicy = {
   maxAttempts: number
   backoffMs?: number
+  nonRetryableErrorTags?: string[]
 }
 
 export type TaskStepResult = {
@@ -88,6 +96,16 @@ export type WaitStepResumeResult = {
   output?: JsonValue
 }
 
+export type SignalRecord = {
+  id: string
+  runId: string
+  signalName: string
+  payload: JsonValue | null
+  consumedAt: Date | null
+  createdAt: Date
+  updatedAt: Date
+}
+
 export type StepExecutionContext = {
   run: WorkflowRunRecord
   input: JsonObject
@@ -95,6 +113,7 @@ export type StepExecutionContext = {
   now: Date
   attempt: number
   idempotencyKey: string
+  heartbeat: () => Promise<boolean>
 }
 
 export type TaskStepDefinition = {
@@ -103,6 +122,7 @@ export type TaskStepDefinition = {
   next?: string
   transitions?: Record<string, string>
   retry?: RetryPolicy
+  timeoutMs?: number
   run: (context: StepExecutionContext) => Promise<TaskStepResult> | TaskStepResult
 }
 
@@ -111,9 +131,23 @@ export type WaitStepDefinition = {
   label?: string
   next?: string
   transitions?: Record<string, string>
+  timeoutMs: number
   open: (
     context: StepExecutionContext
   ) => Promise<WaitStepOpenResult> | WaitStepOpenResult
+  resume: (
+    context: StepExecutionContext,
+    payload: JsonValue | undefined
+  ) => Promise<WaitStepResumeResult> | WaitStepResumeResult
+}
+
+export type SignalStepDefinition = {
+  kind: "signal"
+  label?: string
+  signal: string
+  next?: string
+  transitions?: Record<string, string>
+  timeoutMs: number
   resume: (
     context: StepExecutionContext,
     payload: JsonValue | undefined
@@ -139,6 +173,7 @@ export type EndStepDefinition = {
 export type WorkflowStepDefinition =
   | TaskStepDefinition
   | WaitStepDefinition
+  | SignalStepDefinition
   | SleepStepDefinition
   | EndStepDefinition
 

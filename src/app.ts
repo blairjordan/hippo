@@ -1,3 +1,4 @@
+import type { HippoAuth } from "./lib/auth.js"
 import Fastify from "fastify"
 import sensible from "@fastify/sensible"
 
@@ -9,6 +10,7 @@ import { createMetricsRoutes } from "./routes/metrics.js"
 import { createWorkflowRoutes } from "./routes/workflows.js"
 
 export const createApp = (args: {
+  auth: HippoAuth
   engine: WorkflowEngine
   metrics: HippoMetrics
   store: WorkflowStore
@@ -19,9 +21,14 @@ export const createApp = (args: {
 
   void app.register(sensible)
   void app.register(createHealthRoutes(args.store.ping))
-  void app.register(createMetricsRoutes(args.metrics))
+  void app.register(createMetricsRoutes(args.metrics, args.auth.verifyApiRequest))
   void app.register(
-    createWorkflowRoutes({ engine: args.engine, store: args.store })
+    createWorkflowRoutes({
+      auth: args.auth,
+      engine: args.engine,
+      metrics: args.metrics,
+      store: args.store,
+    })
   )
 
   return app

@@ -62,6 +62,7 @@ const createExecutionContext = (args: {
   run: WorkflowRunRecord
   attempt: number
   stepKey: string
+  heartbeat: () => Promise<boolean>
 }): StepExecutionContext => ({
   run: args.run,
   input: args.run.input,
@@ -69,6 +70,7 @@ const createExecutionContext = (args: {
   now: new Date(),
   attempt: args.attempt,
   idempotencyKey: `${args.run.id}:${args.stepKey}`,
+  heartbeat: args.heartbeat,
 })
 
 const createStepInput = (
@@ -104,8 +106,77 @@ const resolveSleepUntil = (
   return new Date(resolved)
 }
 
+const getStepExpiresAt = (timeoutMs: number, now: Date) =>
+  new Date(now.getTime() + timeoutMs)
+
 const getRetryAvailableAt = (attempt: number, backoffMs = 1_000) =>
   new Date(Date.now() + backoffMs * attempt)
+
+const getErrorTag = (error: unknown) => {
+  if (!error || typeof error !== "object") {
+    return null
+  }
+
+  const tagged = error as { tag?: unknown; code?: unknown; name?: unknown }
+
+  if (typeof tagged.tag === "string") {
+    return tagged.tag
+  }
+
+  if (typeof tagged.code === "string") {
+    return tagged.code
+  }
+
+  if (typeof tagged.name === "string") {
+    return tagged.name
+  }
+
+  return null
+}
+
+const observeRunDuration = (args: {
+  metrics: HippoMetrics
+  run: WorkflowRunRecord
+  status: "completed" | "failed"
+}) => {
+  const durationSeconds =
+    (Date.now() - args.run.createdAt.getTime()) / 1_000
+
+  args.metrics.runDurationSeconds.observe(
+    {
+      workflow: args.run.definitionName,
+      status: args.status,
+    },
+    durationSeconds
+  )
+}
+
+const withTimeout = async <T>(
+  promise: Promise<T>,
+  timeoutMs: number | undefined,
+  label: string
+) => {
+  if (timeoutMs === undefined) {
+    return promise
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${String(timeoutMs)}ms`))
+    }, timeoutMs)
+
+    void promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (error: unknown) => {
+        clearTimeout(timer)
+        reject(error)
+      }
+    )
+  })
+}
 
 const continueRun = async (args: {
   definitions: Map<string, WorkflowDefinition>
@@ -131,6 +202,11 @@ const continueRun = async (args: {
       })
 
       args.metrics.runsCompleted.inc({ workflow: definition.name })
+      observeRunDuration({
+        metrics: args.metrics,
+        run: completed,
+        status: "completed",
+      })
       return completed
     }
 
@@ -141,6 +217,7 @@ const continueRun = async (args: {
           run: activeRun,
           attempt: 0,
           stepKey,
+          heartbeat: async () => false,
         })
       )
 
@@ -163,6 +240,14 @@ const continueRun = async (args: {
       run: activeRun,
       attempt: attempt.attempt,
       stepKey,
+      heartbeat: () =>
+        args.store.extendLease({
+          runId: activeRun.id,
+          stepKey,
+          attemptId: attempt.id,
+          workerId: args.workerId,
+          leaseMs: 15_000,
+        }),
     })
 
     try {
@@ -176,6 +261,7 @@ const continueRun = async (args: {
           context: activeRun.context,
           correlationKey: waitResult.correlationKey,
           payload: waitResult.payload ?? null,
+          expiresAt: getStepExpiresAt(step.timeoutMs, executionContext.now),
           output: waitResult.payload ?? null,
         })
 
@@ -188,7 +274,114 @@ const continueRun = async (args: {
         return activeRun
       }
 
-      const result = await step.run(executionContext)
+      if (step.kind === "signal") {
+        const consumeSignal = () =>
+          args.store.consumeSignal({
+            runId: activeRun.id,
+            signalName: step.signal,
+          })
+
+        const signal = await consumeSignal()
+        const resumeSignal = async (args: {
+          run: WorkflowRunRecord
+          payload: JsonValue | undefined
+          attempt: number
+        }) => {
+          const signalExecutionContext = createExecutionContext({
+            run: args.run,
+            attempt: args.attempt,
+            stepKey,
+            heartbeat: async () => false,
+          })
+          const result: WaitStepResumeResult = await step.resume(
+            signalExecutionContext,
+            args.payload
+          )
+          const nextStepKey = result.transition ?? step.next
+
+          if (!nextStepKey) {
+            throw new Error(
+              `Signal step "${stepKey}" in workflow "${definition.name}" did not resolve a next step`
+            )
+          }
+
+          return {
+            nextStepKey,
+            context: mergeContext(args.run.context, result.patch),
+            output: result.output ?? null,
+          }
+        }
+
+        if (!signal) {
+          activeRun = await args.store.openWait({
+            runId: activeRun.id,
+            stepKey,
+            workerId: args.workerId,
+            attemptId: attempt.id,
+            context: activeRun.context,
+            correlationKey: `signal:${activeRun.id}:${step.signal}`,
+            payload: {
+              signalName: step.signal,
+            },
+            expiresAt: getStepExpiresAt(step.timeoutMs, executionContext.now),
+            output: null,
+          })
+
+          const bufferedSignal = await consumeSignal()
+
+          if (!bufferedSignal) {
+            args.metrics.waitOpens.set(await args.store.countOpenWaits())
+            return activeRun
+          }
+
+          const resumed = await args.store.resumeWait({
+            correlationKey: `signal:${activeRun.id}:${step.signal}`,
+            payload: bufferedSignal.payload ?? undefined,
+            resume: async (run) =>
+              resumeSignal({
+                run,
+                payload: bufferedSignal.payload ?? undefined,
+                attempt: 0,
+              }),
+          })
+
+          args.metrics.waitOpens.set(await args.store.countOpenWaits())
+          return resumed.run
+        }
+
+        const result = await resumeSignal({
+          run: activeRun,
+          payload: signal.payload ?? undefined,
+          attempt: attempt.attempt,
+        })
+        activeRun = await args.store.advanceTaskStep({
+          runId: activeRun.id,
+          stepKey,
+          workerId: args.workerId,
+          attemptId: attempt.id,
+          nextStepKey: result.nextStepKey,
+          context: result.context,
+          output: result.output,
+        })
+
+        args.metrics.stepAttempts.inc({
+          workflow: definition.name,
+          step: stepKey,
+          status: "completed",
+        })
+        args.metrics.waitOpens.set(await args.store.countOpenWaits())
+        return activeRun
+      }
+
+      if (step.kind !== "task") {
+        throw new Error("Encountered an unsupported executable step kind")
+      }
+
+      const result = await withTimeout(
+        Promise.resolve(step.run(executionContext)),
+        step.timeoutMs,
+        `Task step "${stepKey}" in workflow "${definition.name}"`
+      )
       const nextStepKey = resolveTaskTransition(result, step.next)
 
       if (!nextStepKey) {
@@ -219,8 +412,14 @@ const continueRun = async (args: {
       }
 
       const retryPolicy = step.kind === "task" ? step.retry : undefined
+      const errorTag = getErrorTag(error)
+      const isNonRetryable =
+        errorTag !== null &&
+        retryPolicy?.nonRetryableErrorTags?.includes(errorTag) === true
       const canRetry =
-        retryPolicy !== undefined && attempt.attempt < retryPolicy.maxAttempts
+        retryPolicy !== undefined &&
+        !isNonRetryable &&
+        attempt.attempt < retryPolicy.maxAttempts
 
       if (canRetry) {
         activeRun = await args.store.scheduleRetry({
@@ -234,6 +433,10 @@ const continueRun = async (args: {
           ),
           error: asErrorPayload(error),
         })
+        args.metrics.retries.inc({
+          workflow: definition.name,
+          step: stepKey,
+        })
       } else {
         activeRun = await args.store.failRun({
           runId: activeRun.id,
@@ -246,6 +449,11 @@ const continueRun = async (args: {
         args.metrics.runsFailed.inc({
           workflow: definition.name,
           step: stepKey,
+        })
+        observeRunDuration({
+          metrics: args.metrics,
+          run: activeRun,
+          status: "failed",
         })
       }
 
@@ -308,42 +516,48 @@ export const createWorkflowEngine = (args: {
     correlationKey: string
     payload?: JsonValue
   }) =>
-    args.store.resumeWait({
-      correlationKey: input.correlationKey,
-      payload: input.payload,
-      resume: async (run, wait) => {
-        const definition = requireDefinition(definitions, run.definitionName)
-        const step = getStep(definition, wait.stepKey)
+    {
+      const resumed = await args.store.resumeWait({
+        correlationKey: input.correlationKey,
+        payload: input.payload,
+        resume: async (run, wait) => {
+          const definition = requireDefinition(definitions, run.definitionName)
+          const step = getStep(definition, wait.stepKey)
 
-        if (step.kind !== "wait") {
-          throw new Error(
-            `Step "${wait.stepKey}" in workflow "${definition.name}" is not resumable`
+          if (step.kind !== "wait") {
+            throw new Error(
+              `Step "${wait.stepKey}" in workflow "${definition.name}" is not resumable`
+            )
+          }
+
+          const result: WaitStepResumeResult = await step.resume(
+            createExecutionContext({
+              run,
+              attempt: 0,
+              stepKey: wait.stepKey,
+              heartbeat: async () => false,
+            }),
+            input.payload
           )
-        }
+          const nextStepKey = result.transition ?? step.next
 
-        const result: WaitStepResumeResult = await step.resume(
-          createExecutionContext({
-            run,
-            attempt: 0,
-            stepKey: wait.stepKey,
-          }),
-          input.payload
-        )
-        const nextStepKey = result.transition ?? step.next
+          if (!nextStepKey) {
+            throw new Error(
+              `Wait step "${wait.stepKey}" in workflow "${definition.name}" did not resolve a next step`
+            )
+          }
 
-        if (!nextStepKey) {
-          throw new Error(
-            `Wait step "${wait.stepKey}" in workflow "${definition.name}" did not resolve a next step`
-          )
-        }
+          return {
+            nextStepKey,
+            context: mergeContext(run.context, result.patch),
+            output: result.output ?? null,
+          }
+        },
+      })
 
-        return {
-          nextStepKey,
-          context: mergeContext(run.context, result.patch),
-          output: result.output ?? null,
-        }
-      },
-    })
+      args.metrics.waitOpens.set(await args.store.countOpenWaits())
+      return resumed
+    }
 
   return {
     getWorkflow: (workflowName: string) =>

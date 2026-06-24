@@ -52,11 +52,11 @@ export const demoWorkflow = defineWorkflow({
         maxAttempts: 3,
         backoffMs: 1_000,
       },
-      run: ({ input }) => ({
+      run: ({ idempotencyKey, input }) => ({
         patch: {
           provider: "email",
           outboundRequestId: createCorrelationKey(
-            `${String(input.email)}:${Date.now()}`
+            `${idempotencyKey}:email:${String(input.email)}`
           ),
         },
         output: {
@@ -72,11 +72,11 @@ export const demoWorkflow = defineWorkflow({
         maxAttempts: 3,
         backoffMs: 1_000,
       },
-      run: ({ input }) => ({
+      run: ({ idempotencyKey, input }) => ({
         patch: {
           provider: "sms",
           outboundRequestId: createCorrelationKey(
-            `${String(input.phoneNumber)}:${Date.now()}`
+            `${idempotencyKey}:sms:${String(input.phoneNumber)}`
           ),
         },
         output: {
@@ -92,11 +92,11 @@ export const demoWorkflow = defineWorkflow({
         maxAttempts: 3,
         backoffMs: 1_000,
       },
-      run: ({ input }) => ({
+      run: ({ idempotencyKey, input }) => ({
         patch: {
           provider: "webhook",
           outboundRequestId: createCorrelationKey(
-            `${String(input.url)}:${Date.now()}`
+            `${idempotencyKey}:webhook:${String(input.url)}`
           ),
         },
         output: {
@@ -114,6 +114,7 @@ export const demoWorkflow = defineWorkflow({
       kind: "wait",
       label: "Wait for provider callback",
       next: "done",
+      timeoutMs: 86_400_000,
       open: ({ run, context }) => ({
         correlationKey: createCorrelationKey(
           `${run.id}:${String(context.outboundRequestId ?? "missing")}`

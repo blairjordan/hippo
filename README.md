@@ -1,39 +1,41 @@
 # 🦛 Hippo
 
-Hippo is a database-native durable workflow engine.
+Postgres-native durable workflow engine.
 
-It executes workflows with Postgres-backed state, leased workers, durable step attempts, resumable callback waits, and Mermaid-based workflow visualization.
-
-## Current Shape
-
-- TypeScript runtime with a functional core
-- Postgres persistence
-- Typed SQL query modules
-- Fastify API surface
-- Worker loop with durable run claims
-- Mermaid workflow rendering
-- Vitest coverage for workflow execution and rendering
+Hippo runs long-lived workflows with durable state in Postgres, leased workers, retries, waits, and recovery after worker failure.
 
 ## Development
 
 ```bash
 npm install
+npm run db:migrate
 npm run typecheck
 npm run test
+npm run lint
 ```
 
-## Database
+## What Works
 
-Set `DATABASE_URL` and run:
+- Durable workflow runs persisted in Postgres
+- Leased worker execution with `FOR UPDATE SKIP LOCKED`
+- Retryable task steps with backoff and non-retryable error tags
+- Durable waits, callback resume, and sleep/timer steps
+- Operator APIs for run inspection, retry, cancel, and recovery reconcile
+- Bearer-token protected operator APIs
+- HMAC-verified callback resumes
+
+## Run
 
 ```bash
-npm run db:migrate
+npm run dev
 ```
 
-## Workflow Rendering
-
-Render the demo workflow as Mermaid:
+## Scripts
 
 ```bash
+npm run dev
+npm run test
+npm run typecheck
+npm run lint
 npm run render:demo
 ```
