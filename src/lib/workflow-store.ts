@@ -219,10 +219,15 @@ export const createWorkflowStore = (
   db: Database,
   options: {
     notifyRunnable?: () => Promise<void>
+    notifyRunEvent?: (runId: string) => Promise<void>
   } = {}
 ) => {
   const notifyRunnable = async () => {
     await options.notifyRunnable?.()
+  }
+
+  const notifyRunEvent = async (runId: string) => {
+    await options.notifyRunEvent?.(runId)
   }
 
   const startRun = async (args: {
@@ -248,6 +253,7 @@ export const createWorkflowStore = (
       )
 
       await notifyRunnable()
+      await notifyRunEvent(run.id)
       return run
     })
 
@@ -307,6 +313,7 @@ export const createWorkflowStore = (
     }
 
     const run = (await getRun(mapRun(row).id)) ?? mapRun(row)
+    await notifyRunEvent(run.id)
     await wakeParentForChild(run)
     return run
   }
@@ -335,6 +342,7 @@ export const createWorkflowStore = (
 
     const run = mapRun(row)
     await notifyRunnable()
+    await notifyRunEvent(run.id)
     return run
   }
 
@@ -362,7 +370,9 @@ export const createWorkflowStore = (
       throw new LostLeaseError("Failed to open wait under active lease")
     }
 
-    return mapRun(row)
+    const run = mapRun(row)
+    await notifyRunEvent(run.id)
+    return run
   }
 
   const scheduleRetry = async (args: {
@@ -386,7 +396,9 @@ export const createWorkflowStore = (
       throw new LostLeaseError("Failed to schedule retry under active lease")
     }
 
-    return mapRun(row)
+    const run = mapRun(row)
+    await notifyRunEvent(run.id)
+    return run
   }
 
   const failRun = async (args: {
@@ -409,7 +421,9 @@ export const createWorkflowStore = (
       throw new LostLeaseError("Failed to mark run failed under active lease")
     }
 
-    return mapRun(row)
+    const run = mapRun(row)
+    await notifyRunEvent(run.id)
+    return run
   }
 
   const scheduleSleep = async (args: {
@@ -432,7 +446,9 @@ export const createWorkflowStore = (
       throw new LostLeaseError("Failed to schedule sleep step under active lease")
     }
 
-    return mapRun(row)
+    const run = mapRun(row)
+    await notifyRunEvent(run.id)
+    return run
   }
 
   const resumeWait = async (args: {
@@ -498,6 +514,7 @@ export const createWorkflowStore = (
 
       const resumedRun = mapRun(updatedRow)
       await notifyRunnable()
+      await notifyRunEvent(resumedRun.id)
       return { status: "resumed" as const, run: resumedRun }
     })
 
@@ -574,6 +591,7 @@ export const createWorkflowStore = (
 
       const resumedRun = mapRun(updatedRow)
       await notifyRunnable()
+      await notifyRunEvent(resumedRun.id)
       return { status: "resumed" as const, run: resumedRun }
     })
 
@@ -663,6 +681,7 @@ export const createWorkflowStore = (
 
     const run = mapRun(row)
     await notifyRunnable()
+    await notifyRunEvent(run.id)
     return run
   }
 
@@ -748,6 +767,7 @@ export const createWorkflowStore = (
 
     if (row) {
       await notifyRunnable()
+      await notifyRunEvent(row.runId)
       return true
     }
 
@@ -760,8 +780,11 @@ export const createWorkflowStore = (
     reason?: string
   }) => {
     const eventType =
-      args.mode === "hard" ? "run.termination_requested" : "run.cancel_requested"
-    const eventPayload = args.reason ? { reason: args.reason } : {}
+      args.mode === "hard" ? "run.canceled" : "run.cancel_requested"
+    const eventPayload = {
+      mode: args.mode,
+      ...(args.reason ? { reason: args.reason } : {}),
+    }
     const [row] = await queryRows<IRunRow>(
       db,
       `
@@ -824,8 +847,15 @@ export const createWorkflowStore = (
     )
 
     if (row) {
+      const run = mapRun(row)
       await notifyRunnable()
-      return mapRun(row)
+      await notifyRunEvent(run.id)
+
+      if (args.mode === "hard") {
+        await wakeParentForChild(run)
+      }
+
+      return run
     }
 
     return null
@@ -896,6 +926,7 @@ export const createWorkflowStore = (
     }
 
     const run = (await getRun(mapRun(row).id)) ?? mapRun(row)
+    await notifyRunEvent(run.id)
     await wakeParentForChild(run)
     return run
   }
@@ -1178,8 +1209,8 @@ export const createWorkflowStore = (
     runTask: (
       context: StepExecutionContext
     ) => Promise<TaskStepResult> | TaskStepResult
-  }) =>
-    withTransaction(db, async (client) => {
+  }) => {
+    const outcome = await withTransaction(db, async (client) => {
       const [lockedRunRow] = await queryRows<IRunRow>(
         client,
         `
@@ -1525,6 +1556,16 @@ export const createWorkflowStore = (
         }
       }
     })
+    if (outcome.run) {
+      await notifyRunEvent(outcome.run.id)
+
+      if (outcome.outcome === "completed") {
+        await notifyRunnable()
+      }
+    }
+
+    return outcome
+  }
 
   const cancelRun = async (args: {
     runId: string
@@ -1545,6 +1586,7 @@ export const createWorkflowStore = (
 
     const run = mapRun(row)
     await notifyRunnable()
+    await notifyRunEvent(run.id)
     return run
   }
 

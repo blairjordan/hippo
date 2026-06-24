@@ -50,7 +50,7 @@ export const demoWorkflow = defineWorkflow({
       next: "delivery-confirmation",
       retry: {
         maxAttempts: 3,
-        backoffMs: 1_000,
+        initialBackoffMs: 1_000,
       },
       run: ({ idempotencyKey, input }) => ({
         patch: {
@@ -70,7 +70,7 @@ export const demoWorkflow = defineWorkflow({
       next: "delivery-confirmation",
       retry: {
         maxAttempts: 3,
-        backoffMs: 1_000,
+        initialBackoffMs: 1_000,
       },
       run: ({ idempotencyKey, input }) => ({
         patch: {
@@ -90,7 +90,7 @@ export const demoWorkflow = defineWorkflow({
       next: "cooldown",
       retry: {
         maxAttempts: 3,
-        backoffMs: 1_000,
+        initialBackoffMs: 1_000,
       },
       run: ({ idempotencyKey, input }) => ({
         patch: {

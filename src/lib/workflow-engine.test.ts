@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import {
   childStep,
@@ -780,7 +780,7 @@ describe("workflow engine", () => {
           next: "done",
           retry: {
             maxAttempts: 2,
-            backoffMs: 10,
+            initialBackoffMs: 10,
           },
           run: () => {
             throw new Error("boom")
@@ -806,6 +806,67 @@ describe("workflow engine", () => {
 
     expect(queued?.status).toBe("queued")
     expect(queued?.currentStepKey).toBe("unstable")
+  })
+
+  it("applies exponential backoff with jitter and a max cap", async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date("2024-01-01T00:00:00.000Z"))
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(1)
+
+    try {
+      const workflow = defineWorkflow({
+        name: "capped-retry-workflow",
+        version: 1,
+        startAt: "unstable",
+        steps: {
+          unstable: taskStep({
+            kind: "task",
+            next: "done",
+            retry: {
+              maxAttempts: 3,
+              initialBackoffMs: 100,
+              backoffMultiplier: 3,
+              maxBackoffMs: 250,
+              jitterMs: 25,
+            },
+            run: () => {
+              throw new Error("boom")
+            },
+          }),
+          done: endStep(),
+        },
+      })
+      const store = createStoreStub()
+      const engine = createWorkflowEngine({
+        definitions: [workflow],
+        metrics: createMetrics(),
+        store,
+      })
+
+      const run = await engine.startRun({
+        workflowName: "capped-retry-workflow",
+        payload: {},
+      })
+
+      await engine.tick("test-worker", 5_000)
+      const firstRetry = await store.getRun(run.id)
+
+      expect(firstRetry?.availableAt.getTime()).toBe(
+        Date.parse("2024-01-01T00:00:00.125Z")
+      )
+
+      vi.setSystemTime(firstRetry?.availableAt ?? new Date())
+      await engine.tick("test-worker", 5_000)
+      const secondRetry = await store.getRun(run.id)
+
+      expect(
+        (secondRetry?.availableAt.getTime() ?? 0) -
+          (firstRetry?.availableAt.getTime() ?? 0)
+      ).toBe(250)
+    } finally {
+      randomSpy.mockRestore()
+      vi.useRealTimers()
+    }
   })
 
   it("supports sleep scheduling", async () => {
@@ -915,7 +976,7 @@ describe("workflow engine", () => {
           next: "done",
           retry: {
             maxAttempts: 3,
-            backoffMs: 0,
+            initialBackoffMs: 0,
           },
           run: ({ run }) => {
             const attempt = (attemptsByRun.get(run.id) ?? 0) + 1
@@ -1012,7 +1073,7 @@ describe("workflow engine", () => {
           timeoutMs: 5,
           retry: {
             maxAttempts: 2,
-            backoffMs: 0,
+            initialBackoffMs: 0,
           },
           run: async () =>
             new Promise<TaskStepResult>((resolve) => {
@@ -1062,7 +1123,7 @@ describe("workflow engine", () => {
           next: "done",
           retry: {
             maxAttempts: 5,
-            backoffMs: 0,
+            initialBackoffMs: 0,
             nonRetryableErrorTags: ["VALIDATION"],
           },
           run: () => {

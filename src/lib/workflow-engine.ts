@@ -116,36 +116,62 @@ const resolveSleepUntil = (
 const getStepExpiresAt = (timeoutMs: number, now: Date) =>
   new Date(now.getTime() + timeoutMs)
 
+const defaultRetryBackoff = {
+  initialBackoffMs: 1_000,
+  maxBackoffMs: 60_000,
+  backoffMultiplier: 2,
+  jitterMs: 250,
+} as const
+
 const getRetryAvailableAt = (args: {
   attempt: number
-  backoffMs?: number
+  initialBackoffMs?: number
   maxBackoffMs?: number
-  jitter?: boolean
+  backoffMultiplier?: number
+  jitterMs?: number
 }) => {
-  const baseBackoff = args.backoffMs ?? 1_000
-  const exponentialDelay = baseBackoff * 2 ** Math.max(0, args.attempt - 1)
-  const cappedDelay = Math.min(
-    exponentialDelay,
-    args.maxBackoffMs ?? exponentialDelay
+  const initialBackoffMs =
+    args.initialBackoffMs ?? defaultRetryBackoff.initialBackoffMs
+  const maxBackoffMs = args.maxBackoffMs ?? defaultRetryBackoff.maxBackoffMs
+  const backoffMultiplier =
+    args.backoffMultiplier ?? defaultRetryBackoff.backoffMultiplier
+  const jitterMs =
+    args.jitterMs ??
+    (initialBackoffMs === 0 ? 0 : defaultRetryBackoff.jitterMs)
+  const exponentialDelay =
+    initialBackoffMs * backoffMultiplier ** Math.max(0, args.attempt - 1)
+  const cappedDelay = Math.min(exponentialDelay, maxBackoffMs)
+  const jitterOffset =
+    jitterMs <= 0 ? 0 : Math.round((Math.random() * 2 - 1) * jitterMs)
+  const jitteredDelay = Math.min(
+    maxBackoffMs,
+    Math.max(0, cappedDelay + jitterOffset)
   )
-  const jitterMultiplier = args.jitter === false ? 1 : 0.5 + Math.random() * 0.5
 
-  return new Date(Date.now() + Math.round(cappedDelay * jitterMultiplier))
+  return new Date(Date.now() + jitteredDelay)
 }
 
 const isTerminalStatus = (status: WorkflowRunRecord["status"]) =>
   status === "completed" || status === "failed" || status === "canceled"
 
 const createRetryDelayInput = (retryPolicy: {
-  backoffMs?: number
+  initialBackoffMs?: number
   maxBackoffMs?: number
-  jitter?: boolean
+  backoffMultiplier?: number
+  jitterMs?: number
 }) => ({
-  ...(retryPolicy.backoffMs === undefined ? {} : { backoffMs: retryPolicy.backoffMs }),
+  ...(retryPolicy.initialBackoffMs === undefined
+    ? {}
+    : { initialBackoffMs: retryPolicy.initialBackoffMs }),
   ...(retryPolicy.maxBackoffMs === undefined
     ? {}
     : { maxBackoffMs: retryPolicy.maxBackoffMs }),
-  ...(retryPolicy.jitter === undefined ? {} : { jitter: retryPolicy.jitter }),
+  ...(retryPolicy.backoffMultiplier === undefined
+    ? {}
+    : { backoffMultiplier: retryPolicy.backoffMultiplier }),
+  ...(retryPolicy.jitterMs === undefined
+    ? {}
+    : { jitterMs: retryPolicy.jitterMs }),
 })
 
 const getErrorTag = (error: unknown) => {
@@ -806,6 +832,7 @@ export const createWorkflowEngine = (args: {
     getWorkflow: (workflowName: string) =>
       requireDefinition(definitions, workflowName),
     hasWorkflow: (workflowName: string) => getDefinition(definitions, workflowName) !== null,
+    listWorkflows: () => [...definitions.values()],
     resumeWait,
     startRun,
     tick,

@@ -76,9 +76,10 @@ export type WorkflowStepAttemptRecord = {
 
 export type RetryPolicy = {
   maxAttempts: number
-  backoffMs?: number
+  initialBackoffMs?: number
   maxBackoffMs?: number
-  jitter?: boolean
+  backoffMultiplier?: number
+  jitterMs?: number
   nonRetryableErrorTags?: string[]
 }
 

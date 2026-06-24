@@ -22,6 +22,7 @@ const main = async () => {
   const notifier = createWorkflowNotifier(config)
   const store = createWorkflowStore(sql, {
     notifyRunnable: () => notifier.notifyRunnable(),
+    notifyRunEvent: (runId) => notifier.notifyRunEvent(runId),
   })
   const engine = createWorkflowEngine({
     definitions: workflows,
@@ -35,14 +36,20 @@ const main = async () => {
       toleranceSeconds: config.HIPPO_CALLBACK_TOLERANCE_SECONDS,
     }),
   }
-  const app = createApp({ auth, engine, metrics, store })
+  const app = createApp({
+    auth,
+    engine,
+    listenForNotifications: notifier.listen,
+    metrics,
+    store,
+  })
 
   const stopWorker = startWorkerLoop({
     engine,
     workerId: config.HIPPO_WORKER_ID,
     pollIntervalMs: config.HIPPO_POLL_INTERVAL_MS,
     leaseMs: config.HIPPO_LEASE_MS,
-    listenForWakeups: notifier.listen,
+    listenForWakeups: (onWake) => notifier.listen(() => onWake()),
     onError: (error) => {
       app.log.error(error)
     },

@@ -264,6 +264,83 @@ describe("app routes", () => {
     await failingApp.close()
   })
 
+  it("renders the dashboard skeleton", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/dashboard",
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.headers["content-type"]).toContain("text/html")
+    expect(response.body).toContain("Hippo dashboard")
+    expect(response.body).toContain("Workflow definitions")
+  })
+
+  it("renders a run detail dashboard page", async () => {
+    const runStore = {
+      ...createStoreStub(),
+      async getRun() {
+        return createRunRecord({
+          currentStepKey: "delivery-confirmation",
+          status: "waiting",
+        })
+      },
+      async getRunAttempts(): Promise<WorkflowStepAttemptRecord[]> {
+        return [
+          {
+            id: "attempt-1",
+            runId: "run-1",
+            stepKey: "send-email",
+            attempt: 1,
+            status: "completed",
+            input: {},
+            output: { accepted: true },
+            error: null,
+            startedAt: new Date(),
+            lastHeartbeatAt: null,
+            completedAt: new Date(),
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+        ]
+      },
+      async getRunEvents(): Promise<WorkflowEventRecord[]> {
+        return [
+          {
+            id: 1,
+            runId: "run-1",
+            stepKey: "send-email",
+            eventType: "step.completed",
+            payload: { nextStepKey: "delivery-confirmation" },
+            createdAt: new Date(),
+          },
+        ]
+      },
+    }
+    const runApp = createApp({
+      auth: createAuth(),
+      engine: createWorkflowEngine({
+        definitions: [demoWorkflow],
+        metrics: createMetrics(),
+        store: runStore,
+      }),
+      metrics: createMetrics(),
+      store: runStore,
+    })
+
+    const response = await runApp.inject({
+      method: "GET",
+      url: "/dashboard/runs/11111111-1111-4111-8111-111111111111",
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.headers["content-type"]).toContain("text/html")
+    expect(response.body).toContain("Live events")
+    expect(response.body).toContain("/v1/runs/run-1/stream?afterEventId=1")
+
+    await runApp.close()
+  })
+
   it("treats duplicate wait resumes as idempotent success", async () => {
     const duplicateStore = {
       ...createStoreStub(),

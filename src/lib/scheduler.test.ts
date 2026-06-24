@@ -43,6 +43,9 @@ describe("scheduler", () => {
       hasWorkflow() {
         return true
       },
+      listWorkflows() {
+        return []
+      },
       async resumeWait() {
         throw new Error("not used")
       },

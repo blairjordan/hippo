@@ -1,0 +1,201 @@
+Hippo local roadmap
+
+Positioning
+- Not "Temporal lite". Pitch is "Trigger.dev DX, your own Postgres, no SaaS, no cluster."
+- Hippo wins on setup simplicity + local/staging/prod parity + Postgres-native moat (same-txn step commit, outbox, LISTEN/NOTIFY).
+- Hippo loses on polyglot, replay debugging, and massive horizontal fan-out — and that is fine for the sweet spot (small/mid-scale TS shops that already run Postgres).
+- Honest parity claim: hippo abstracts retries, queues, state machines, and timers. Rollbacks require saga primitive (Wave 0) before claim holds.
+
+Resolved product decisions
+- Postgres is the only supported backend. SQLite is out of scope.
+- Workers are stateless. Durable execution state lives in Postgres only.
+- Workflow definitions are code-defined and runs pin `definition_version`.
+- Retries are configured per step.
+- Callback correlation keys are first-class persisted records.
+- Inline JSON payloads are acceptable for normal control-plane data; large blobs should be stored externally and referenced.
+
+Next up (ordered, work top-down)
+1. Exponential backoff + jitter + max delay cap (Wave 0)         — small, ~1h, closes retry claim
+2. Hard termination + cancel propagation                          — finishes the cancel story, unblocks child cancel semantics
+3. Web dashboard skeleton + SSE event tail (Tier 5)               — biggest DX lever per colleague feedback
+4. `npx hippo init` + `hippo dev` scaffolds (Tier 5)              — 5-min quickstart
+5. Saga / compensate primitive (Wave 0)                            — closes rollback claim
+6. Client-supplied idempotency key on POST /runs                   — small, missing dedup on retried starts
+7. Zod step IO + OTel spans                                        — DX polish
+8. Continue-as-new + Time-travel rewind/fork                       — schema-touching, batch with partitioning
+9. Partition workflow_step_attempts + workflow_events by hash(run_id) — irreversible, do once schema settles
+10. Tier 1 SDK monorepo split + publish                            — last
+
+Wave 0 — Temporal parity claim (small, unblock honest marketing)
+- [x] Exponential backoff + jitter + max delay cap
+  Extend RetryPolicy: { maxAttempts, initialBackoffMs, maxBackoffMs, backoffMultiplier, jitterMs }. Replace getRetryAvailableAt linear formula with exponential + capped + jittered. Default policy preset.
+- [ ] Saga / compensate primitive (biggest gap for the rollback claim)
+  Per-task step optional `compensate: (ctx, error) => Promise<void>`. On run terminal failure (or hard cancel), engine walks completed steps in reverse and invokes compensate. Persist compensation attempts as workflow_step_attempts with `kind = 'compensate'`. Skip steps with no compensate fn.
+  Subtleties: compensate runs inside its own retry policy (separate from forward retry). Compensate failures escalate to operator (status=`compensation_failed`).
+- [ ] Task queues + priority
+  Add `task_queue TEXT NOT NULL DEFAULT 'default'` + `priority INT NOT NULL DEFAULT 0` to workflow_runs. Worker registers with one or more queues; claim filters by queue and ORDER BY priority DESC, available_at ASC. Backward-compatible default queue.
+
+Tier 1 — table stakes for DE
+- [x] Signals: push events into a running run
+  Durable signal table + route + engine consume-or-open-wait branch + atomic consumeSignalAndResumeWait closing the post-openWait race (commit 31f4f83).
+  Optional follow-up: client-supplied dedup_key with unique (run_id, signal_name, dedup_key) for idempotent signal posts.
+- [~] Queries: read live state without mutation
+  Current state: run detail, attempts, events, active/failed/stuck operator queries exist.
+  Open: safe projection of running run context for client queries (single-run context endpoint, projection helpers).
+- [~] Retry policy per step
+  Current state: max attempts, backoff, and non-retryable error tags are implemented.
+  Open: exponential backoff + jitter + max delay cap, richer retry classification / policy presets (covered by Wave 0).
+- [~] Idempotency keys / activity IDs
+  Current state: stable step-scoped idempotency keys exist in execution context.
+  Open: client-supplied idempotency key on POST /runs to dedup duplicate starts, explicit external activity/outbox helper for exactly-once side effects.
+- [x] Durable timers / sleep
+- [x] Wait expiry: timeoutMs required on wait/signal steps, recovery expires overdue waits and fails the run
+- [x] Cron schedules
+  workflow_schedules table + startScheduleLoop (src/lib/scheduler.ts) using cron-parser + nextFireAt, atomic claim and dispatch.
+- [~] Child workflows + cancel propagation
+  Current state: engine has kind === "child" branch, parent_run_id linkage, getChildRun + wakeParentForChild store methods, hard cancel propagation parent→children via operator routes.
+  Open: child-failure handling beyond happy path, child timeout, fan-out (parallel children).
+- [~] Cancellation + termination
+  Current state: durable cancel route exists, cancelMode column on runs ('graceful' | 'hard'), cancelRunAtBoundary store method, hard termination finalizes the durable run state immediately and prevents in-flight step commits from landing afterward.
+  Open: explicit in-process step abortion signal if step bodies need cooperative teardown.
+- [x] Step heartbeats for long activities / lease extension
+  ctx.heartbeat() updates workflow_runs.lease_expires_at and workflow_step_attempts.last_heartbeat_at under owner+lease guard.
+- [~] Versioning
+  Current state: runs pin workflow definition version.
+  Open: deploy-safe execution for retired code paths and explicit upgrade policy.
+
+Tier 2 — Postgres-native edge
+- [x] Same-transaction step commit for workflow state + user DB writes
+  `transactional: true` on task step → engine runs body inside SAVEPOINT hippo_step_body within the step txn (executeTransactionalTask in workflow-store.ts).
+- [x] `FOR UPDATE SKIP LOCKED` worker pull
+- [x] `LISTEN` / `NOTIFY` wakeups
+  src/lib/notifier.ts: NOTIFY on workflow_runnable channel after run state mutations; worker subscribes via listenForWakeups.
+- [x] Outbox pattern helper
+  workflow_outbox table + enqueueOutbox in transactional step ctx + startOutboxLoop drain with topic→handler map.
+- [ ] Partition workflow_step_attempts + workflow_events by hash(run_id)
+  Why: hot fan-out and long-running workflows grow both tables fast; partitioning gives writes parallelism and lets archival drop partitions wholesale instead of row-deletes.
+  Scope:
+    1. Convert workflow_step_attempts to PARTITION BY HASH (run_id). 16 or 32 child partitions. Same for workflow_events.
+    2. Migration is non-trivial: existing rows must be copied into partitioned table. Cut-over inside a single transaction or use `CREATE TABLE ... PARTITION BY ...` + `INSERT ... SELECT` + atomic rename. Document downtime tradeoffs.
+    3. All unique constraints must include run_id (or be local to a partition). Audit current indexes — primary keys on (id) alone do not work with hash partitioning; switch to (run_id, id) or local indexes per partition.
+    4. Verify hot queries (`getRunAttempts`, `getRunEvents`, `beginStepAttempt`) still hit a single partition. Add EXPLAIN snapshots to test suite.
+    5. Foreign keys: PG supports FK on partitioned tables since 12 but with caveats — re-validate workflow_step_attempts(run_id) -> workflow_runs(id) constraint behavior.
+    6. Worker claim path (workflow_runs) stays unpartitioned for now. Revisit only if claim contention shows up in metrics.
+  Out of scope: tenant-level partitioning (different topic, do after if/when tenancy lands).
+  Acceptance: typecheck + test + lint pass; integration test inserts 10k attempts across 1k runs and verifies partition pruning via EXPLAIN.
+- [~] Continue-as-new + archival (history bounding)
+  Current state: none.
+  Open: TaskStepResult.continueAsNew option that completes current run and starts a new run with continued_from_run_id link; archival job that moves completed-run events older than N days to workflow_archive_events (or external sink) and deletes from hot tables; declarative partitioning above makes archival a partition-drop.
+
+Tier 3 — differentiation
+- [ ] Mermaid live render of run state with current step highlighted
+- [ ] Time-travel replay (snapshot rewind / fork — Path A)
+  Add step_seq monotonic column + context_before snapshot on workflow_step_attempts; POST /v1/runs/:runId/rewind { toAttemptId } and POST /v1/runs/:runId/fork { fromAttemptId }; preserve forward events as branched_from.
+- [ ] Human-in-the-loop task with URL + expiry
+- [x] Webhook callback waits with built-in HMAC verification
+- [ ] OpenTelemetry spans
+- [~] Typed TypeScript workflows + validated step IO
+  Current state: typed workflow definitions exist.
+  Open: Zod-validated step inputs and outputs.
+
+Tier 3.5 — Temporal feature gaps worth filling (lower priority than DX/Wave-0)
+- [ ] Workflow Updates (synchronous query-with-mutation)
+  Temporal "Update" semantics: client sends request that mutates state and waits for result. Hippo could implement as a signal variant with response channel (insert request, worker processes, response row, client polls or LISTEN/NOTIFY).
+- [ ] Search attributes
+  Optional JSONB `search_attributes` column on workflow_runs + GIN index. Operator search by `attrs @> '{"customerId":"..."}'`. No separate Elasticsearch needed (Temporal's killer dependency).
+- [ ] Side effects helper
+  Only needed if Path B replay (deterministic generator workflows) lands. Today hippo's step model already records non-deterministic values via step output.
+- [ ] Nexus / cross-namespace operations
+  Skip until multi-tenancy lands. Out of scope for v1.
+- [ ] Workflow signals with response (signal-with-result)
+  Equivalent to Updates above; pick one shape.
+
+Tier 4 — SDK + packaging (PROMOTED — DX is the pitch, not features)
+- [ ] Tier 1 SDK: TS in-process SDK (ship current capability as a real package)
+  Goal: someone can `npm install` hippo, define workflows in their own repo, run a worker + API server, without copy-pasting from this repo. No new runtime features — pure packaging, public API surface, and DX.
+  Scope:
+    1. Split the repo into packages (monorepo, e.g. npm workspaces or pnpm):
+       - @hippo/core           engine + store + types (current src/lib + src/types + src/queries + src/sql)
+       - @hippo/sdk            workflow definition helpers, step builders, public re-exports
+       - @hippo/server         Fastify routes + worker tick loop + recovery loop (current src/app + src/routes + src/index + src/lib/worker + src/lib/recovery)
+       - @hippo/cli            thin bin: `hippo migrate`, `hippo render <workflow>`, `hippo worker`, `hippo server`
+    2. Public API surface in @hippo/sdk:
+       - defineWorkflow({ name, version, startAt, steps })
+       - Step builders: task(), wait(), signal(), sleep(), end() — each returns a typed step def matching current union, with required fields enforced (timeoutMs on wait/signal, next on sleep, etc.).
+       - Optional Zod integration: task({ input: z.object({...}), output: z.object({...}), run: ... }) — validates at runtime; defaults to passthrough when no schema given.
+       - Re-export StepExecutionContext, TaskStepResult, RetryPolicy, etc.
+    3. Public API surface in @hippo/core:
+       - createWorkflowStore(db), createWorkflowEngine({ definitions, metrics, store }), LostLeaseError, types.
+       - Keep SQL files shipped alongside, exported as raw strings so embedders can run migrations.
+    4. Public API surface in @hippo/server:
+       - createApp({ engine, store, metrics, auth }) returning a Fastify instance.
+       - startWorker({ engine, intervalMs, leaseMs, workerId }) returning a stop handle.
+       - startRecoveryLoop({ store, intervalMs }) returning a stop handle.
+    5. CLI in @hippo/cli (commander or cac):
+       - `hippo migrate --database-url=...`  runs db/migrations/*.sql
+       - `hippo render <workflowName>`       static Mermaid via renderWorkflowAsMermaid
+       - `hippo worker`                      bootstraps store + engine + worker loop from env (DATABASE_URL, HIPPO_API_TOKEN, HIPPO_CALLBACK_SECRET)
+       - `hippo server`                      same as `worker` but also starts the Fastify API
+    6. Stability + DX:
+       - Add `exports` map to each package.json; ESM-only; type=module.
+       - One README per package with a minimum quickstart (< 20 lines of user code starting a workflow).
+       - Top-level repo README points at the packages; current bootstrap README content gets demoted into examples/.
+       - examples/ folder with a runnable demo workflow consuming @hippo/sdk + @hippo/server.
+       - changesets or release-please for versioned publishing. Start at 0.x.
+    7. CI: typecheck + test + lint at the workspace level; package each on tag.
+  Non-goals (keep this Tier 1 — defer to Tier 2 SDK):
+    - Remote worker protocol over HTTP/gRPC. Workers stay in-process. Polyglot SDKs out of scope.
+    - Workflow code sandboxing or determinism enforcement.
+    - Hosted service. Self-host only.
+  Acceptance:
+    - User in a fresh repo runs: `npm i @hippo/sdk @hippo/server @hippo/core pg && npx hippo migrate && node demo.js`, starts a workflow via HTTP, sees Mermaid render, signal resumes a wait step. Zero references to hippo source paths.
+    - typecheck + test + lint pass at workspace root.
+    - All existing tests pass after the move with import paths updated.
+
+- [ ] Tier 2 SDK: remote worker protocol (deferred decision)
+  Enables polyglot workers (Go, Python). Requires task_queues + pending_step_invocations tables, HTTP poll/complete endpoints, lease over HTTP. Conflicts with same-txn step commit moat — do not commit until polyglot demand is concrete.
+
+Tier 5 — DX parity with Trigger.dev (this is the actual pitch)
+  Driver feedback: "Temporal too complicated to set up. Trigger.dev easier, better local/staging/prod handling."
+  Goal: 5 minutes from `git clone` to seeing a workflow execute. Same config working locally, staging, prod with no rewrites.
+- [ ] `npx hippo init` scaffold command
+  Creates: docker-compose.yml (Postgres + hippo container), .env with safe defaults, src/workflows/example.ts, package.json scripts, README. One command, working demo.
+- [ ] `hippo dev` — single command starts everything
+  Spawns Postgres via docker-compose (if not running), runs migrations, starts hippo server + worker with hot-reload of workflows (tsx watch). Logs colored, structured.
+- [~] Web dashboard (Trigger.dev's killer feature)
+  Current state: embedded `/dashboard` route with active/failed run lists, workflow definition Mermaid views, run detail page, and live event tail.
+  Embedded route /dashboard. Server-rendered (Fastify + minimal React or vanilla HTMX) — no separate frontend service. Views:
+    - Run list with filter by workflow / status / search attrs
+    - Run detail: live Mermaid render with current step highlighted, event log timeline, attempt history with input/output diffs, context viewer
+    - Workflow definitions list with static Mermaid
+    - Live tail of events via SSE
+    - Operator actions: cancel, retry, rewind, fork (when Time-travel ships)
+  No auth in dev (loopback only). Token auth in prod (reuse HIPPO_API_TOKEN).
+- [ ] Environment story: local / staging / prod parity
+  Same code, env vars switch behaviour. Document the matrix:
+    - DATABASE_URL                  → which Postgres
+    - HIPPO_ENV=dev|staging|prod    → log level, auth strictness, dashboard auth
+    - HIPPO_API_TOKEN / SECRET      → required in non-dev
+    - HIPPO_HMAC_SKEW_SECONDS       → callback clock skew tolerance
+  Provide `.env.example` for each env. Document deploy recipes for Fly.io, Railway, Render, plain Docker.
+- [x] Realtime run status streaming (SSE)
+  GET /v1/runs/:runId/stream → SSE of events as they happen. Use LISTEN/NOTIFY on workflow_events insert. Both dashboard and client SDK consume.
+- [ ] Hot-reload workflow registration in dev
+  When src/workflows/*.ts changes, re-register definitions without restart. Worker picks up new version on next claim. Pin running runs to their original version (already done via definition_version).
+- [ ] Examples directory with realistic workflows
+  - Webhook ingestion + retry + dead-letter
+  - Order fulfillment with saga compensation
+  - Cron-triggered nightly report
+  - Long-running approval (signal + wait + expiry)
+  - Fan-out via child workflows (when child workflows ship)
+- [ ] Deployment recipes
+  Production-ready docker-compose, Fly.toml, railway.json, render.yaml. Single-container option for trivial deploys. Multi-container option (api + N workers) for scale.
+- [ ] README quickstart < 5 minutes
+  `npx hippo init my-app && cd my-app && npx hippo dev` → open http://localhost:3000/dashboard, click "Run example workflow", see it execute.
+- [ ] CLI ergonomics
+  `hippo runs ls`, `hippo runs show <id>`, `hippo runs cancel <id>`, `hippo workflows ls`, `hippo workflows render <name>` — operator CLI parity with dashboard, scriptable.
+
+Cross-cutting acceptance for Tier 5
+  - New user goes from zero to a running workflow visible in dashboard in under 5 minutes on a fresh machine with only Docker installed.
+  - Same workflow code deploys to staging and prod with only env var changes.
+  - Dashboard works on mobile / over SSH tunnel (no client-side framework bloat).
