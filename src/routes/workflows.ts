@@ -140,186 +140,596 @@ const statusToneByRun = {
   canceled: "tone-canceled",
 } as const
 
-const renderDashboardDocument = (args: {
-  activeRunsHtml: string
-  failedRunsHtml: string
-  workflowsHtml: string
-}) => `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Hippo Dashboard</title>
-    <style>
-      :root {
-        color-scheme: light;
-        --page: #f7f2e8;
-        --panel: rgba(255, 252, 247, 0.92);
-        --line: #d8c9ae;
-        --ink: #1f1b16;
-        --muted: #665b4d;
-        --accent: #1f6f5f;
-        --accent-soft: #d7ece7;
-        --warn: #a94f1d;
-        --danger: #8c1d18;
-        --shadow: 0 18px 40px rgba(77, 57, 28, 0.12);
+const renderMermaidMount = (graph: string) =>
+  `<div class="mermaid" data-graph="${escapeHtml(graph)}"></div>`
+
+const renderMermaidBootstrap = () => `<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs"
+
+  const storageKey = "hippo-dashboard-theme"
+  const root = document.documentElement
+  const getPreferredTheme = () => {
+    const storedTheme = window.localStorage.getItem(storageKey)
+
+    if (storedTheme === "light" || storedTheme === "dark") {
+      return storedTheme
+    }
+
+    return window.matchMedia("(prefers-color-scheme: dark)").matches
+      ? "dark"
+      : "light"
+  }
+
+  const applyTheme = (theme) => {
+    root.classList.toggle("dark", theme === "dark")
+    root.style.colorScheme = theme
+    window.localStorage.setItem(storageKey, theme)
+    const toggle = document.querySelector("[data-theme-toggle]")
+
+    if (toggle instanceof HTMLButtonElement) {
+      toggle.dataset.theme = theme
+      toggle.setAttribute(
+        "aria-label",
+        theme === "dark" ? "Switch to light mode" : "Switch to dark mode"
+      )
+      toggle.textContent = theme === "dark" ? "Light" : "Dark"
+    }
+  }
+
+  const renderFallback = () => {
+    for (const node of document.querySelectorAll(".mermaid")) {
+      const graph = node.getAttribute("data-graph")
+
+      if (!graph) {
+        continue
       }
 
-      * { box-sizing: border-box; }
+      node.innerHTML = '<pre class="mermaid-fallback"></pre>'
+      const pre = node.querySelector("pre")
+
+      if (pre) {
+        pre.textContent = graph
+      }
+    }
+  }
+
+  const renderMermaids = async () => {
+    const isDark = root.classList.contains("dark")
+
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: "loose",
+      theme: "base",
+      themeVariables: {
+        primaryColor: isDark ? "#0f172a" : "#ffffff",
+        primaryTextColor: isDark ? "#e2e8f0" : "#0f172a",
+        primaryBorderColor: isDark ? "#475569" : "#cbd5e1",
+        lineColor: isDark ? "#64748b" : "#94a3b8",
+        secondaryColor: isDark ? "#111827" : "#f8fafc",
+        tertiaryColor: isDark ? "#020617" : "#f8fafc",
+        background: "transparent",
+        fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
+      },
+      flowchart: {
+        curve: "linear",
+        useMaxWidth: true,
+        htmlLabels: true,
+      },
+    })
+
+    for (const node of document.querySelectorAll(".mermaid")) {
+      const graph = node.getAttribute("data-graph")
+
+      if (!graph) {
+        continue
+      }
+
+      node.removeAttribute("data-processed")
+      node.textContent = graph
+    }
+
+    try {
+      await mermaid.run({
+        querySelector: ".mermaid",
+      })
+    } catch (error) {
+      renderFallback()
+      console.error(error)
+    }
+  }
+
+  applyTheme(getPreferredTheme())
+  await renderMermaids()
+
+  document.querySelector("[data-theme-toggle]")?.addEventListener("click", async () => {
+    const nextTheme = root.classList.contains("dark") ? "light" : "dark"
+    applyTheme(nextTheme)
+    await renderMermaids()
+  })
+</script>`
+
+const shadcnThemeTokens = `
+      :root {
+        color-scheme: light;
+        --background: 0 0% 100%;
+        --foreground: 240 10% 3.9%;
+        --card: 0 0% 100%;
+        --card-foreground: 240 10% 3.9%;
+        --popover: 0 0% 100%;
+        --popover-foreground: 240 10% 3.9%;
+        --primary: 240 5.9% 10%;
+        --primary-foreground: 0 0% 98%;
+        --secondary: 240 4.8% 95.9%;
+        --secondary-foreground: 240 5.9% 10%;
+        --muted: 240 4.8% 95.9%;
+        --muted-foreground: 240 3.8% 46.1%;
+        --accent: 240 4.8% 95.9%;
+        --accent-foreground: 240 5.9% 10%;
+        --destructive: 0 84.2% 60.2%;
+        --destructive-foreground: 0 0% 98%;
+        --warning: 38 92% 50%;
+        --success: 142 71% 36%;
+        --info: 217 91% 60%;
+        --border: 240 5.9% 90%;
+        --input: 240 5.9% 90%;
+        --ring: 240 10% 3.9%;
+        --radius: 0.5rem;
+      }
+
+      :root.dark {
+        color-scheme: dark;
+        --background: 240 10% 3.9%;
+        --foreground: 0 0% 98%;
+        --card: 240 10% 3.9%;
+        --card-foreground: 0 0% 98%;
+        --popover: 240 10% 3.9%;
+        --popover-foreground: 0 0% 98%;
+        --primary: 0 0% 98%;
+        --primary-foreground: 240 5.9% 10%;
+        --secondary: 240 3.7% 15.9%;
+        --secondary-foreground: 0 0% 98%;
+        --muted: 240 3.7% 15.9%;
+        --muted-foreground: 240 5% 64.9%;
+        --accent: 240 3.7% 15.9%;
+        --accent-foreground: 0 0% 98%;
+        --destructive: 0 62.8% 30.6%;
+        --destructive-foreground: 0 0% 98%;
+        --warning: 38 92% 60%;
+        --success: 142 71% 45%;
+        --info: 217 91% 70%;
+        --border: 240 3.7% 15.9%;
+        --input: 240 3.7% 15.9%;
+        --ring: 240 4.9% 83.9%;
+      }`
+
+const shadcnBaseStyles = `
+      *, *::before, *::after { box-sizing: border-box; border-color: hsl(var(--border)); }
 
       body {
         margin: 0;
-        font-family: "Iowan Old Style", "Palatino Linotype", serif;
-        color: var(--ink);
-        background:
-          radial-gradient(circle at top left, rgba(31, 111, 95, 0.16), transparent 34%),
-          linear-gradient(160deg, #fbf6ec 0%, var(--page) 48%, #efe2cb 100%);
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-feature-settings: "rlig" 1, "calt" 1;
+        background: hsl(var(--background));
+        color: hsl(var(--foreground));
+        -webkit-font-smoothing: antialiased;
+        line-height: 1.5;
       }
 
-      main {
-        width: min(1180px, calc(100vw - 32px));
+      h1, h2, h3, h4, p { margin: 0; }
+      a { color: inherit; text-decoration: none; }
+      code { font-family: ui-monospace, "SFMono-Regular", "Menlo", monospace; font-size: 0.85em; }
+
+      .container {
+        width: 100%;
+        max-width: 1400px;
         margin: 0 auto;
-        padding: 32px 0 56px;
+        padding: 0 2rem;
       }
 
-      h1, h2, h3 { margin: 0; font-weight: 700; }
-      p { margin: 0; color: var(--muted); }
-      a { color: inherit; }
-
-      .hero {
-        display: grid;
-        gap: 12px;
-        margin-bottom: 24px;
-        padding: 28px;
-        border: 1px solid rgba(31, 111, 95, 0.15);
-        border-radius: 24px;
-        background: linear-gradient(135deg, rgba(255,255,255,0.9), rgba(231,243,238,0.95));
-        box-shadow: var(--shadow);
+      .site-header {
+        position: sticky;
+        top: 0;
+        z-index: 40;
+        background: hsl(var(--background) / 0.95);
+        border-bottom: 1px solid hsl(var(--border));
+        backdrop-filter: blur(8px);
       }
 
-      .hero h1 { font-size: clamp(2rem, 4vw, 3.4rem); letter-spacing: -0.04em; }
-      .hero p { max-width: 64ch; font-size: 1rem; line-height: 1.5; }
-
-      .grid {
-        display: grid;
-        gap: 18px;
-        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      }
-
-      .panel {
-        border: 1px solid var(--line);
-        border-radius: 20px;
-        background: var(--panel);
-        box-shadow: var(--shadow);
-        overflow: hidden;
-      }
-
-      .panel-header {
+      .header-row {
         display: flex;
         align-items: center;
         justify-content: space-between;
-        gap: 12px;
-        padding: 18px 20px 12px;
+        gap: 1rem;
+        height: 3.5rem;
       }
 
-      .panel-body { padding: 0 20px 20px; }
+      .brand-row {
+        display: flex;
+        align-items: center;
+        gap: 1.5rem;
+      }
 
-      .stack { display: grid; gap: 12px; }
+      .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-weight: 600;
+        font-size: 0.95rem;
+        letter-spacing: -0.01em;
+      }
 
-      .run-card, .workflow-card {
-        display: grid;
-        gap: 8px;
-        padding: 14px;
-        border: 1px solid rgba(216, 201, 174, 0.9);
-        border-radius: 16px;
-        background: rgba(255,255,255,0.72);
+      .brand-mark {
+        display: inline-flex;
+        width: 1.5rem;
+        height: 1.5rem;
+        border-radius: 0.375rem;
+        background: hsl(var(--primary));
+        color: hsl(var(--primary-foreground));
+        align-items: center;
+        justify-content: center;
+        font-size: 0.7rem;
+        font-weight: 700;
+      }
+
+      .nav {
+        display: flex;
+        align-items: center;
+        gap: 1.25rem;
+      }
+
+      .nav-item {
+        font-size: 0.875rem;
+        font-weight: 500;
+        color: hsl(var(--muted-foreground));
+        transition: color 0.15s;
+      }
+      .nav-item:hover { color: hsl(var(--foreground)); }
+      .nav-item-active { color: hsl(var(--foreground)); }
+
+      .header-actions { display: flex; align-items: center; gap: 0.5rem; }
+
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        white-space: nowrap;
+        font-size: 0.875rem;
+        font-weight: 500;
+        border-radius: calc(var(--radius) - 2px);
+        transition: background 0.15s, color 0.15s, border-color 0.15s;
+        cursor: pointer;
+        border: 1px solid transparent;
+        font-family: inherit;
+        text-decoration: none;
+      }
+      .btn-sm { height: 2.25rem; padding: 0 0.75rem; }
+      .btn-primary {
+        background: hsl(var(--primary));
+        color: hsl(var(--primary-foreground));
+      }
+      .btn-primary:hover { background: hsl(var(--primary) / 0.9); }
+      .btn-outline {
+        background: hsl(var(--background));
+        border-color: hsl(var(--input));
+        color: hsl(var(--foreground));
+      }
+      .btn-outline:hover { background: hsl(var(--accent)); color: hsl(var(--accent-foreground)); }
+
+      .card {
+        background: hsl(var(--card));
+        color: hsl(var(--card-foreground));
+        border: 1px solid hsl(var(--border));
+        border-radius: var(--radius);
+        box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.04);
+      }
+
+      .card-header {
+        display: flex;
+        flex-direction: column;
+        gap: 0.375rem;
+        padding: 1.5rem 1.5rem 0;
+      }
+      .card-header-row {
+        flex-direction: row;
+        align-items: center;
+        justify-content: space-between;
+        padding-bottom: 0.5rem;
+        gap: 0.5rem;
+      }
+      .card-title {
+        font-size: 1rem;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        line-height: 1.2;
+      }
+      .card-title-sm {
+        font-size: 0.875rem;
+        font-weight: 500;
+        line-height: 1;
+      }
+      .card-description {
+        font-size: 0.875rem;
+        color: hsl(var(--muted-foreground));
+      }
+      .card-content { padding: 1.5rem; }
+      .card-header + .card-content { padding-top: 1rem; }
+
+      .icon { width: 1rem; height: 1rem; color: hsl(var(--muted-foreground)); flex-shrink: 0; }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        border-radius: calc(var(--radius) - 2px);
+        padding: 0.125rem 0.5rem;
+        border: 1px solid transparent;
+        font-size: 0.75rem;
+        font-weight: 600;
+        line-height: 1.25;
+        text-transform: capitalize;
+      }
+      .tone-queued, .tone-waiting {
+        background: hsl(var(--warning) / 0.12);
+        border-color: hsl(var(--warning) / 0.3);
+        color: hsl(var(--warning));
+      }
+      .tone-running {
+        background: hsl(var(--info) / 0.12);
+        border-color: hsl(var(--info) / 0.3);
+        color: hsl(var(--info));
+      }
+      .tone-completed {
+        background: hsl(var(--success) / 0.12);
+        border-color: hsl(var(--success) / 0.3);
+        color: hsl(var(--success));
+      }
+      .tone-failed {
+        background: hsl(var(--destructive) / 0.12);
+        border-color: hsl(var(--destructive) / 0.3);
+        color: hsl(var(--destructive));
+      }
+      .tone-canceled {
+        background: hsl(var(--muted));
+        border-color: hsl(var(--border));
+        color: hsl(var(--muted-foreground));
+      }
+
+      .meta {
+        font-family: ui-monospace, "SFMono-Regular", "Menlo", monospace;
+        font-size: 0.75rem;
+        color: hsl(var(--muted-foreground));
       }
 
       .row {
         display: flex;
         align-items: center;
         justify-content: space-between;
-        gap: 12px;
+        gap: 0.75rem;
         flex-wrap: wrap;
       }
 
-      .meta {
-        font-family: "SFMono-Regular", "Menlo", monospace;
-        font-size: 0.82rem;
-        color: var(--muted);
+      .stack { display: grid; gap: 0.75rem; }`
+
+const renderDashboardDocument = (args: {
+  activeRunsHtml: string
+  failedRunsHtml: string
+  workflowsHtml: string
+}) => {
+  const activeRunCount = (args.activeRunsHtml.match(/run-card/g) ?? []).length
+  const failedRunCount = (args.failedRunsHtml.match(/run-card/g) ?? []).length
+  const workflowCount = (args.workflowsHtml.match(/workflow-card/g) ?? []).length
+
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Hippo dashboard</title>
+    <style>${shadcnThemeTokens}${shadcnBaseStyles}
+      .main {
+        padding-top: 1.5rem;
+        padding-bottom: 4rem;
+        display: grid;
+        gap: 1.5rem;
       }
 
-      .pill {
-        display: inline-flex;
-        align-items: center;
-        border-radius: 999px;
-        padding: 4px 10px;
-        font-size: 0.82rem;
+      .page-header {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 1rem;
+        flex-wrap: wrap;
+      }
+      .page-title h1 {
+        font-size: 1.875rem;
         font-weight: 700;
+        letter-spacing: -0.025em;
+        line-height: 1.1;
+      }
+      .page-title p {
+        font-size: 0.875rem;
+        color: hsl(var(--muted-foreground));
+        margin-top: 0.375rem;
       }
 
-      .tone-queued, .tone-waiting { background: #f4ead7; color: #7a5710; }
-      .tone-running { background: var(--accent-soft); color: var(--accent); }
-      .tone-completed { background: #dff1dd; color: #25653b; }
-      .tone-failed { background: #f8ddda; color: var(--danger); }
-      .tone-canceled { background: #ebe3e3; color: #5f4750; }
-
-      .action {
-        text-decoration: none;
+      .stat-grid {
+        display: grid;
+        gap: 1rem;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      }
+      .stat-value {
+        font-size: 1.875rem;
         font-weight: 700;
+        letter-spacing: -0.025em;
+        line-height: 1;
       }
+      .stat-foot {
+        margin-top: 0.375rem;
+        font-size: 0.75rem;
+        color: hsl(var(--muted-foreground));
+      }
+
+      .two-col {
+        display: grid;
+        gap: 1rem;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      }
+
+      .run-card {
+        display: grid;
+        gap: 0.5rem;
+        padding: 1rem;
+        border: 1px solid hsl(var(--border));
+        border-radius: calc(var(--radius) - 2px);
+        background: hsl(var(--card));
+        transition: background 0.15s;
+      }
+      .run-card:hover { background: hsl(var(--muted) / 0.5); }
+      .run-title { font-size: 0.9rem; font-weight: 600; color: hsl(var(--foreground)); }
+      .run-title:hover { text-decoration: underline; text-underline-offset: 3px; }
 
       .empty {
-        padding: 14px;
-        border: 1px dashed var(--line);
-        border-radius: 16px;
-        color: var(--muted);
+        padding: 2rem 1rem;
+        border: 1px dashed hsl(var(--border));
+        border-radius: calc(var(--radius) - 2px);
+        color: hsl(var(--muted-foreground));
+        font-size: 0.875rem;
+        text-align: center;
       }
 
-      @media (max-width: 700px) {
-        main { width: min(100vw - 20px, 1180px); padding-top: 20px; }
-        .hero { padding: 22px; }
+      .workflow-card {
+        display: grid;
+        gap: 1rem;
+        grid-template-columns: minmax(0, 280px) minmax(0, 1fr);
+        align-items: start;
+        padding: 1rem;
+        border: 1px solid hsl(var(--border));
+        border-radius: calc(var(--radius) - 2px);
+        background: hsl(var(--card));
+      }
+      .workflow-info { display: grid; gap: 0.5rem; }
+      .workflow-info h3 { font-size: 1rem; font-weight: 600; letter-spacing: -0.01em; }
+      .workflow-info p { font-size: 0.8125rem; color: hsl(var(--muted-foreground)); }
+      .workflow-diagram {
+        min-height: 180px;
+        padding: 0.75rem;
+        border: 1px solid hsl(var(--border));
+        border-radius: calc(var(--radius) - 2px);
+        background: hsl(var(--muted) / 0.4);
+        overflow: auto;
+      }
+
+      .link-action { font-size: 0.8125rem; font-weight: 500; color: hsl(var(--muted-foreground)); }
+      .link-action:hover { color: hsl(var(--foreground)); }
+
+      .mermaid { min-width: 480px; }
+      .mermaid-fallback {
+        white-space: pre-wrap;
+        font-family: ui-monospace, "SFMono-Regular", monospace;
+        font-size: 0.75rem;
+        color: hsl(var(--muted-foreground));
+      }
+
+      @media (max-width: 900px) {
+        .container { padding: 0 1rem; }
+        .two-col { grid-template-columns: 1fr; }
+        .workflow-card { grid-template-columns: 1fr; }
+        .nav { display: none; }
+        .mermaid { min-width: 360px; }
       }
     </style>
   </head>
   <body>
-    <main>
-      <section class="hero">
-        <h1>Hippo dashboard</h1>
-        <p>Run state, retry pressure, and workflow topology in one place. This skeleton uses the existing operator APIs plus SSE for live event tails.</p>
-      </section>
-      <section class="grid">
-        <article class="panel">
-          <div class="panel-header">
-            <div>
-              <h2>Active runs</h2>
-              <p>Queued, running, and waiting work.</p>
-            </div>
-          </div>
-          <div class="panel-body stack">${args.activeRunsHtml}</div>
-        </article>
-        <article class="panel">
-          <div class="panel-header">
-            <div>
-              <h2>Failed runs</h2>
-              <p>Terminal failures that may need retry or inspection.</p>
-            </div>
-          </div>
-          <div class="panel-body stack">${args.failedRunsHtml}</div>
-        </article>
-      </section>
-      <section class="panel" style="margin-top: 18px;">
-        <div class="panel-header">
-          <div>
-            <h2>Workflow definitions</h2>
-            <p>Registered workflows with static Mermaid renders.</p>
-          </div>
+    <header class="site-header">
+      <div class="container header-row">
+        <div class="brand-row">
+          <a class="brand" href="/dashboard">
+            <span class="brand-mark">H</span>
+            <span>Hippo</span>
+          </a>
+          <nav class="nav">
+            <a class="nav-item nav-item-active" href="#overview">Overview</a>
+            <a class="nav-item" href="#runs">Runs</a>
+            <a class="nav-item" href="#workflows">Workflows</a>
+          </nav>
         </div>
-        <div class="panel-body stack">${args.workflowsHtml}</div>
+        <div class="header-actions">
+          <button class="btn btn-outline btn-sm" type="button" data-theme-toggle aria-label="Switch theme">Dark</button>
+        </div>
+      </div>
+    </header>
+    <main class="container main" id="overview">
+      <div class="page-header">
+        <div class="page-title">
+          <h1>Hippo dashboard</h1>
+          <p>Run state, retry pressure, and workflow topology in one place.</p>
+        </div>
+        <div class="header-actions">
+          <a class="btn btn-outline btn-sm" href="/metrics">Metrics</a>
+        </div>
+      </div>
+
+      <section class="stat-grid">
+        <article class="card">
+          <div class="card-header card-header-row">
+            <h3 class="card-title-sm">Active runs</h3>
+            <svg class="icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 12-4 4-3-9-3 18-3-13H2"/></svg>
+          </div>
+          <div class="card-content">
+            <div class="stat-value">${String(activeRunCount)}</div>
+            <p class="stat-foot">Queued, running, or waiting</p>
+          </div>
+        </article>
+        <article class="card">
+          <div class="card-header card-header-row">
+            <h3 class="card-title-sm">Failed runs</h3>
+            <svg class="icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
+          </div>
+          <div class="card-content">
+            <div class="stat-value">${String(failedRunCount)}</div>
+            <p class="stat-foot">Terminal failures requiring review</p>
+          </div>
+        </article>
+        <article class="card">
+          <div class="card-header card-header-row">
+            <h3 class="card-title-sm">Registered workflows</h3>
+            <svg class="icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" x2="6" y1="3" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>
+          </div>
+          <div class="card-content">
+            <div class="stat-value">${String(workflowCount)}</div>
+            <p class="stat-foot">Definitions available to start</p>
+          </div>
+        </article>
+      </section>
+
+      <section class="two-col" id="runs">
+        <article class="card">
+          <div class="card-header">
+            <h3 class="card-title">Active runs</h3>
+            <p class="card-description">Queued, running, and waiting work.</p>
+          </div>
+          <div class="card-content stack">${args.activeRunsHtml}</div>
+        </article>
+        <article class="card">
+          <div class="card-header">
+            <h3 class="card-title">Failed runs</h3>
+            <p class="card-description">Terminal failures that may need retry or inspection.</p>
+          </div>
+          <div class="card-content stack">${args.failedRunsHtml}</div>
+        </article>
+      </section>
+
+      <section class="card" id="workflows">
+        <div class="card-header">
+          <h3 class="card-title">Workflow definitions</h3>
+          <p class="card-description">Registered workflows with rendered topology previews.</p>
+        </div>
+        <div class="card-content stack">${args.workflowsHtml}</div>
       </section>
     </main>
+    ${renderMermaidBootstrap()}
   </body>
 </html>`
+}
 
 const renderDashboardRun = (run: {
   id: string
@@ -330,12 +740,11 @@ const renderDashboardRun = (run: {
   updatedAt: Date
 }) => `<article class="run-card">
   <div class="row">
-    <a class="action" href="${dashboardRunPath(run.id)}">${escapeHtml(run.definitionName)}</a>
-    <span class="pill ${statusToneByRun[run.status]}">${escapeHtml(run.status)}</span>
+    <a class="run-title" href="${dashboardRunPath(run.id)}">${escapeHtml(run.definitionName)}</a>
+    <span class="badge ${statusToneByRun[run.status]}">${escapeHtml(run.status)}</span>
   </div>
   <div class="meta">${escapeHtml(run.id)}</div>
-  <div class="meta">step ${escapeHtml(run.currentStepKey ?? "—")} · available ${escapeHtml(formatDateTime(run.availableAt))}</div>
-  <div class="meta">updated ${escapeHtml(formatDateTime(run.updatedAt))}</div>
+  <div class="meta">step ${escapeHtml(run.currentStepKey ?? "—")} · updated ${escapeHtml(formatDateTime(run.updatedAt))}</div>
 </article>`
 
 const renderWorkflowCard = (args: {
@@ -343,14 +752,13 @@ const renderWorkflowCard = (args: {
   workflowName: string
   workflowTitle?: string
 }) => `<article class="workflow-card">
-  <div class="row">
-    <div>
-      <h3>${escapeHtml(args.workflowTitle ?? args.workflowName)}</h3>
-      <div class="meta">${escapeHtml(args.workflowName)}</div>
-    </div>
-    <a class="action" href="/v1/workflows/${encodeURIComponent(args.workflowName)}/render">Mermaid</a>
+  <div class="workflow-info">
+    <h3>${escapeHtml(args.workflowTitle ?? args.workflowName)}</h3>
+    <div class="meta">${escapeHtml(args.workflowName)}</div>
+    <p>Static topology preview for the registered definition.</p>
+    <a class="link-action" href="/v1/workflows/${encodeURIComponent(args.workflowName)}/render">View source →</a>
   </div>
-  <pre class="meta" style="margin: 0; white-space: pre-wrap;">${escapeHtml(args.mermaid)}</pre>
+  <div class="workflow-diagram">${renderMermaidMount(args.mermaid)}</div>
 </article>`
 
 const renderRunDetailDocument = (args: {
@@ -365,97 +773,207 @@ const renderRunDetailDocument = (args: {
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Run ${escapeHtml(args.run?.id ?? "")}</title>
-    <style>
-      :root {
-        color-scheme: light;
-        --page: #f6f2ea;
-        --panel: rgba(255, 252, 247, 0.95);
-        --line: #d7cbb4;
-        --ink: #201912;
-        --muted: #6a5b48;
-        --accent: #195d82;
-        --shadow: 0 18px 40px rgba(72, 55, 26, 0.12);
+    <style>${shadcnThemeTokens}${shadcnBaseStyles}
+      .main {
+        padding-top: 1.5rem;
+        padding-bottom: 4rem;
+        display: grid;
+        gap: 1.5rem;
       }
-      * { box-sizing: border-box; }
-      body {
-        margin: 0;
-        font-family: Georgia, "Times New Roman", serif;
-        color: var(--ink);
-        background:
-          linear-gradient(180deg, rgba(25, 93, 130, 0.08), transparent 30%),
-          linear-gradient(135deg, #fcf7ee 0%, var(--page) 60%, #efe5d2 100%);
+
+      .page-header {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 1rem;
+        flex-wrap: wrap;
       }
-      main { width: min(1180px, calc(100vw - 24px)); margin: 0 auto; padding: 24px 0 48px; display: grid; gap: 18px; }
-      a { color: inherit; }
-      .hero, .panel {
-        border: 1px solid var(--line);
-        border-radius: 22px;
-        background: var(--panel);
-        box-shadow: var(--shadow);
+      .page-title h1 {
+        font-size: 1.5rem;
+        font-weight: 700;
+        letter-spacing: -0.025em;
+        line-height: 1.2;
       }
-      .hero { padding: 24px; display: grid; gap: 10px; }
-      .hero h1 { margin: 0; font-size: clamp(1.8rem, 3vw, 2.6rem); letter-spacing: -0.04em; }
-      .hero p, .meta { margin: 0; color: var(--muted); }
-      .grid { display: grid; gap: 18px; grid-template-columns: 1.2fr 0.8fr; }
-      .panel { overflow: hidden; }
-      .panel header { padding: 16px 18px 12px; border-bottom: 1px solid rgba(215, 203, 180, 0.8); }
-      .panel header h2 { margin: 0; }
-      .panel section { padding: 18px; }
+      .page-title p {
+        font-size: 0.875rem;
+        color: hsl(var(--muted-foreground));
+        margin-top: 0.375rem;
+      }
+      .page-title .meta-id {
+        display: inline-block;
+        margin-top: 0.5rem;
+      }
+
+      .grid {
+        display: grid;
+        gap: 1rem;
+        grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+      }
+
+      .summary { display: grid; gap: 0.75rem; }
+      .summary-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+        font-size: 0.875rem;
+      }
+      .summary-row > span:first-child { color: hsl(var(--muted-foreground)); }
+      .summary-row > span:last-child {
+        font-family: ui-monospace, "SFMono-Regular", "Menlo", monospace;
+        font-size: 0.8125rem;
+      }
+
+      .section-title {
+        font-size: 0.875rem;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        margin: 0 0 0.75rem;
+        color: hsl(var(--foreground));
+      }
+
       pre {
         margin: 0;
         white-space: pre-wrap;
         word-break: break-word;
-        font-family: "SFMono-Regular", "Menlo", monospace;
-        font-size: 0.84rem;
+        font-family: ui-monospace, "SFMono-Regular", "Menlo", monospace;
+        font-size: 0.8125rem;
+        padding: 0.75rem;
+        background: hsl(var(--muted) / 0.5);
+        border: 1px solid hsl(var(--border));
+        border-radius: calc(var(--radius) - 2px);
+        color: hsl(var(--foreground));
       }
-      .card-list { display: grid; gap: 12px; }
-      .entry { padding: 12px; border: 1px solid rgba(215, 203, 180, 0.85); border-radius: 16px; background: rgba(255,255,255,0.74); }
-      .entry strong { display: block; margin-bottom: 6px; }
-      .entry time { color: var(--muted); font-size: 0.82rem; }
-      .summary { display: grid; gap: 10px; }
-      .summary-row { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-      .summary-row span:last-child { font-family: "SFMono-Regular", "Menlo", monospace; }
-      @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+
+      .card-list { display: grid; gap: 0.75rem; }
+
+      .entry {
+        padding: 1rem;
+        border: 1px solid hsl(var(--border));
+        border-radius: calc(var(--radius) - 2px);
+        background: hsl(var(--card));
+      }
+      .entry strong {
+        display: block;
+        margin-bottom: 0.375rem;
+        font-size: 0.875rem;
+        font-weight: 600;
+      }
+      .entry time {
+        display: block;
+        margin-bottom: 0.5rem;
+        font-size: 0.75rem;
+        color: hsl(var(--muted-foreground));
+        font-family: ui-monospace, "SFMono-Regular", "Menlo", monospace;
+      }
+      .entry pre { font-size: 0.75rem; }
+
+      .diagram-shell {
+        min-height: 260px;
+        padding: 0.75rem;
+        border: 1px solid hsl(var(--border));
+        border-radius: calc(var(--radius) - 2px);
+        background: hsl(var(--muted) / 0.4);
+        overflow: auto;
+      }
+
+      .mermaid { min-width: 560px; }
+      .mermaid-fallback {
+        white-space: pre-wrap;
+        font-family: ui-monospace, "SFMono-Regular", monospace;
+        font-size: 0.75rem;
+        color: hsl(var(--muted-foreground));
+      }
+
+      .back-link {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.375rem;
+        font-size: 0.875rem;
+        font-weight: 500;
+        color: hsl(var(--muted-foreground));
+      }
+      .back-link:hover { color: hsl(var(--foreground)); }
+
+      @media (max-width: 900px) {
+        .container { padding: 0 1rem; }
+        .grid { grid-template-columns: 1fr; }
+        .nav { display: none; }
+        .mermaid { min-width: 360px; }
+      }
     </style>
   </head>
   <body>
-    <main>
-      <section class="hero">
-        <a href="/dashboard">← Back to dashboard</a>
-        <h1>${escapeHtml(args.run?.definitionName ?? "Run")} · ${escapeHtml(args.run?.id ?? "")}</h1>
-        <p>Live event tail is powered by <code>GET /v1/runs/:runId/stream</code>. The pane below appends new workflow events without a page reload.</p>
-      </section>
+    <header class="site-header">
+      <div class="container header-row">
+        <div class="brand-row">
+          <a class="brand" href="/dashboard">
+            <span class="brand-mark">H</span>
+            <span>Hippo</span>
+          </a>
+          <nav class="nav">
+            <a class="nav-item" href="/dashboard">Overview</a>
+            <a class="nav-item nav-item-active" href="#">Run detail</a>
+          </nav>
+        </div>
+        <div class="header-actions">
+          <a class="back-link" href="/dashboard">← Back to dashboard</a>
+          <button class="btn btn-outline btn-sm" type="button" data-theme-toggle aria-label="Switch theme">Dark</button>
+        </div>
+      </div>
+    </header>
+    <main class="container main">
+      <div class="page-header">
+        <div class="page-title">
+          <h1>${escapeHtml(args.run?.definitionName ?? "Run")}</h1>
+          <p>Live event tail powered by <code>GET /v1/runs/:runId/stream</code>.</p>
+          <div class="meta meta-id">${escapeHtml(args.run?.id ?? "")}</div>
+        </div>
+        <span class="badge ${
+          args.run?.status && args.run.status in statusToneByRun
+            ? statusToneByRun[args.run.status as keyof typeof statusToneByRun]
+            : "tone-canceled"
+        }">${escapeHtml(args.run?.status ?? "missing")}</span>
+      </div>
       <section class="grid">
-        <article class="panel">
-          <header><h2>Run detail</h2></header>
-          <section class="summary">
-            <div class="summary-row"><span>Status</span><span>${escapeHtml(args.run?.status ?? "missing")}</span></div>
-            <div class="summary-row"><span>Current step</span><span>${escapeHtml(args.run?.currentStepKey ?? "—")}</span></div>
-            <div class="summary-row"><span>Created</span><span>${escapeHtml(formatDateTime(args.run?.createdAt ?? null))}</span></div>
-            <div class="summary-row"><span>Updated</span><span>${escapeHtml(formatDateTime(args.run?.updatedAt ?? null))}</span></div>
-            <div class="summary-row"><span>Completed</span><span>${escapeHtml(formatDateTime(args.run?.completedAt ?? null))}</span></div>
-          </section>
-          <section>
-            <h2 style="margin: 0 0 12px;">Context</h2>
+        <article class="card">
+          <div class="card-header">
+            <h3 class="card-title">Run detail</h3>
+            <p class="card-description">Status, context, and topology for this run.</p>
+          </div>
+          <div class="card-content">
+            <div class="summary">
+              <div class="summary-row"><span>Status</span><span>${escapeHtml(args.run?.status ?? "missing")}</span></div>
+              <div class="summary-row"><span>Current step</span><span>${escapeHtml(args.run?.currentStepKey ?? "—")}</span></div>
+              <div class="summary-row"><span>Created</span><span>${escapeHtml(formatDateTime(args.run?.createdAt ?? null))}</span></div>
+              <div class="summary-row"><span>Updated</span><span>${escapeHtml(formatDateTime(args.run?.updatedAt ?? null))}</span></div>
+              <div class="summary-row"><span>Completed</span><span>${escapeHtml(formatDateTime(args.run?.completedAt ?? null))}</span></div>
+            </div>
+            <h4 class="section-title" style="margin-top: 1.5rem;">Context</h4>
             <pre>${formatJson(args.run?.context ?? {})}</pre>
-          </section>
-          <section>
-            <h2 style="margin: 0 0 12px;">Workflow map</h2>
-            <pre>${escapeHtml(args.workflowMermaid)}</pre>
-          </section>
+            <h4 class="section-title" style="margin-top: 1.5rem;">Workflow map</h4>
+            <div class="diagram-shell">${renderMermaidMount(args.workflowMermaid)}</div>
+          </div>
         </article>
-        <article class="panel">
-          <header><h2>Attempts</h2></header>
-          <section class="card-list">${args.attempts}</section>
+        <article class="card">
+          <div class="card-header">
+            <h3 class="card-title">Attempts</h3>
+            <p class="card-description">Per-step execution history.</p>
+          </div>
+          <div class="card-content card-list">${args.attempts}</div>
         </article>
       </section>
-      <article class="panel">
-        <header><h2>Live events</h2></header>
-        <section>
+      <article class="card">
+        <div class="card-header">
+          <h3 class="card-title">Live events</h3>
+          <p class="card-description">New events stream in via SSE.</p>
+        </div>
+        <div class="card-content">
           <div id="event-list" class="card-list">${args.events}</div>
-        </section>
+        </div>
       </article>
     </main>
+    ${renderMermaidBootstrap()}
     <script>
       const eventList = document.getElementById("event-list")
       const source = new EventSource("/v1/runs/${args.run?.id ?? ""}/stream?afterEventId=${String(args.lastEventId)}")
@@ -638,12 +1156,16 @@ export const createWorkflowRoutes = (args: {
           ? attempts.map(renderAttemptCard).join("")
           : '<div class="entry">No attempts recorded yet.</div>',
       events:
-        events.length > 0
+      events.length > 0
           ? events.map(renderEventCard).join("")
           : '<div class="entry">No workflow events recorded yet.</div>',
       lastEventId: events.at(-1)?.id ?? 0,
       run,
-      workflowMermaid: renderWorkflowAsMermaid(workflow),
+      workflowMermaid: renderWorkflowAsMermaid(workflow, {
+        ...(run.currentStepKey === null
+          ? {}
+          : { highlightedStepKey: run.currentStepKey }),
+      }),
     })
 
     reply.header("content-type", "text/html; charset=utf-8")

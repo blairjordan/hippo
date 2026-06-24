@@ -274,6 +274,10 @@ describe("app routes", () => {
     expect(response.headers["content-type"]).toContain("text/html")
     expect(response.body).toContain("Hippo dashboard")
     expect(response.body).toContain("Workflow definitions")
+    expect(response.body).toContain('data-theme-toggle')
+    expect(response.body).toContain('class="mermaid"')
+    expect(response.body).toContain("hippo-dashboard-theme")
+    expect(response.body).toContain("cdn.jsdelivr.net/npm/mermaid")
   })
 
   it("renders a run detail dashboard page", async () => {
@@ -336,6 +340,9 @@ describe("app routes", () => {
     expect(response.statusCode).toBe(200)
     expect(response.headers["content-type"]).toContain("text/html")
     expect(response.body).toContain("Live events")
+    expect(response.body).toContain('data-theme-toggle')
+    expect(response.body).toContain('class="mermaid"')
+    expect(response.body).toContain("class step_5_delivery_confirmation currentStep")
     expect(response.body).toContain("/v1/runs/run-1/stream?afterEventId=1")
 
     await runApp.close()

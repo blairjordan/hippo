@@ -8,11 +8,20 @@ describe("workflow rendering", () => {
     const output = renderWorkflowAsMermaid(demoWorkflow)
 
     expect(output).toContain("flowchart TD")
-    expect(output).toContain("classify-recipient")
-    expect(output).toContain("delivery-confirmation")
-    expect(output).toContain("classify-recipient --> send-email")
-    expect(output).toContain("classify-recipient --> send-sms")
-    expect(output).toContain("classify-recipient --> send-webhook")
+    expect(output).toContain("Classify recipient")
+    expect(output).toContain("Wait for provider callback")
+    expect(output).toContain("step_0_classify_recipient --> step_1_send_email")
+    expect(output).toContain("step_0_classify_recipient --> step_2_send_sms")
+    expect(output).toContain("step_0_classify_recipient --> step_3_send_webhook")
+  })
+
+  it("highlights the current step with a Mermaid class", () => {
+    const output = renderWorkflowAsMermaid(demoWorkflow, {
+      highlightedStepKey: "delivery-confirmation",
+    })
+
+    expect(output).toContain("class step_5_delivery_confirmation currentStep")
+    expect(output).toContain("classDef currentStep")
   })
 
   it("rejects workflows with missing step targets", () => {

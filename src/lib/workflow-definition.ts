@@ -90,48 +90,86 @@ const formatLabel = (workflow: WorkflowDefinition, stepKey: string) => {
   return step.label ?? `${stepKey}\\n(${step.kind})`
 }
 
+const getNodeId = (stepKey: string, index: number) =>
+  `step_${String(index)}_${stepKey.replaceAll(/[^a-zA-Z0-9_]/g, "_")}`
+
 const getEdges = (workflow: WorkflowDefinition) =>
   Object.entries(workflow.steps).flatMap(([stepKey, step]) =>
     getStaticTargets(step).map((to) => ({ from: stepKey, to }))
   )
 
-export const renderWorkflowAsMermaid = (workflow: WorkflowDefinition) => {
+export const renderWorkflowAsMermaid = (
+  workflow: WorkflowDefinition,
+  options: {
+    highlightedStepKey?: string
+  } = {}
+) => {
   const lines = ["flowchart TD"]
+  const nodeIds = new Map(
+    Object.keys(workflow.steps).map((stepKey, index) => [
+      stepKey,
+      getNodeId(stepKey, index),
+    ])
+  )
 
   for (const [stepKey, step] of Object.entries(workflow.steps)) {
     const label = formatLabel(workflow, stepKey)
+    const nodeId = nodeIds.get(stepKey)
+
+    if (!nodeId) {
+      throw new Error(`Workflow "${workflow.name}" is missing node id for "${stepKey}"`)
+    }
 
     if (step.kind === "end") {
-      lines.push(`  ${stepKey}(["${label}"])`)
+      lines.push(`  ${nodeId}(["${label}"])`)
       continue
     }
 
     if (step.kind === "wait") {
-      lines.push(`  ${stepKey}{{"${label}"}}`)
+      lines.push(`  ${nodeId}{{"${label}"}}`)
       continue
     }
 
     if (step.kind === "signal") {
-      lines.push(`  ${stepKey}{{"${label}"}}`)
+      lines.push(`  ${nodeId}{{"${label}"}}`)
       continue
     }
 
     if (step.kind === "child") {
-      lines.push(`  ${stepKey}[/"${label}"/]`)
+      lines.push(`  ${nodeId}[/"${label}"/]`)
       continue
     }
 
     if (step.kind === "sleep") {
-      lines.push(`  ${stepKey}[["${label}"]]`)
+      lines.push(`  ${nodeId}[["${label}"]]`)
       continue
     }
 
-    lines.push(`  ${stepKey}["${label}"]`)
+    lines.push(`  ${nodeId}["${label}"]`)
   }
 
   for (const edge of getEdges(workflow)) {
-    lines.push(`  ${edge.from} --> ${edge.to}`)
+    const from = nodeIds.get(edge.from)
+    const to = nodeIds.get(edge.to)
+
+    if (!from || !to) {
+      throw new Error(
+        `Workflow "${workflow.name}" is missing node ids for edge "${edge.from}" -> "${edge.to}"`
+      )
+    }
+
+    lines.push(`  ${from} --> ${to}`)
   }
+
+  if (options.highlightedStepKey) {
+    const highlightedNodeId = nodeIds.get(options.highlightedStepKey)
+
+    if (highlightedNodeId) {
+      lines.push(`  class ${highlightedNodeId} currentStep`)
+    }
+  }
+
+  lines.push("  classDef currentStep fill:#c6f6d5,stroke:#14532d,stroke-width:4px,color:#14532d")
 
   return lines.join("\n")
 }
