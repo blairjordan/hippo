@@ -15,23 +15,20 @@ Resolved product decisions
 - Inline JSON payloads are acceptable for normal control-plane data; large blobs should be stored externally and referenced.
 
 Next up (ordered, work top-down)
-1. Exponential backoff + jitter + max delay cap (Wave 0)         — small, ~1h, closes retry claim
-2. Hard termination + cancel propagation                          — finishes the cancel story, unblocks child cancel semantics
-3. Web dashboard skeleton + SSE event tail (Tier 5)               — biggest DX lever per colleague feedback
-4. `npx hippo init` + `hippo dev` scaffolds (Tier 5)              — 5-min quickstart
-5. Saga / compensate primitive (Wave 0)                            — closes rollback claim
-6. Client-supplied idempotency key on POST /runs                   — small, missing dedup on retried starts
-7. Zod step IO + OTel spans                                        — DX polish
-8. Continue-as-new + Time-travel rewind/fork                       — schema-touching, batch with partitioning
-9. Partition workflow_step_attempts + workflow_events by hash(run_id) — irreversible, do once schema settles
-10. Tier 1 SDK monorepo split + publish                            — last
+1. Task queues + priority                                          — next runtime routing primitive
+2. Zod step IO + OTel spans                                        — DX polish
+3. Continue-as-new + Time-travel rewind/fork                       — schema-touching, batch with partitioning
+4. Partition workflow_step_attempts + workflow_events by hash(run_id) — irreversible, do once schema settles
+5. Tier 1 SDK monorepo split + publish                             — package the current surface honestly
+6. Hot-reload workflow registration in dev                         — tighten local DX loop
+7. Examples directory with realistic workflows                     — prove the primitives on real flows
+8. CLI ergonomics                                                  — operator CLI parity with dashboard
 
 Wave 0 — Temporal parity claim (small, unblock honest marketing)
 - [x] Exponential backoff + jitter + max delay cap
   Extend RetryPolicy: { maxAttempts, initialBackoffMs, maxBackoffMs, backoffMultiplier, jitterMs }. Replace getRetryAvailableAt linear formula with exponential + capped + jittered. Default policy preset.
-- [ ] Saga / compensate primitive (biggest gap for the rollback claim)
-  Per-task step optional `compensate: (ctx, error) => Promise<void>`. On run terminal failure (or hard cancel), engine walks completed steps in reverse and invokes compensate. Persist compensation attempts as workflow_step_attempts with `kind = 'compensate'`. Skip steps with no compensate fn.
-  Subtleties: compensate runs inside its own retry policy (separate from forward retry). Compensate failures escalate to operator (status=`compensation_failed`).
+- [x] Saga / compensate primitive
+  Per-task steps can now define `compensate`. On terminal failure or hard terminate, the engine walks completed steps in reverse, persists compensation attempts with `kind = 'compensate'`, retries them under their own policy, and escalates terminal compensation failure as `compensation_failed`.
 - [ ] Task queues + priority
   Add `task_queue TEXT NOT NULL DEFAULT 'default'` + `priority INT NOT NULL DEFAULT 0` to workflow_runs. Worker registers with one or more queues; claim filters by queue and ORDER BY priority DESC, available_at ASC. Backward-compatible default queue.
 
@@ -43,8 +40,8 @@ Tier 1 — table stakes for DE
   Current state: run detail, attempts, events, active/failed/stuck operator queries exist, plus single-run context projection endpoint.
   Open: richer query helpers and workflow-owned projection contracts for clients that should not consume raw context keys.
 - [~] Retry policy per step
-  Current state: max attempts, backoff, and non-retryable error tags are implemented.
-  Open: exponential backoff + jitter + max delay cap, richer retry classification / policy presets (covered by Wave 0).
+  Current state: max attempts, exponential backoff, jitter, max delay cap, and non-retryable error tags are implemented.
+  Open: richer retry classification and policy presets.
 - [~] Idempotency keys / activity IDs
   Current state: stable step-scoped idempotency keys exist in execution context, and client-supplied `Idempotency-Key` headers on POST /runs dedup duplicate starts durably in Postgres.
   Open: explicit external activity/outbox helper for exactly-once side effects.
@@ -53,7 +50,7 @@ Tier 1 — table stakes for DE
 - [x] Cron schedules
   workflow_schedules table + startScheduleLoop (src/lib/scheduler.ts) using cron-parser + nextFireAt, atomic claim and dispatch.
 - [~] Child workflows + cancel propagation
-  Current state: engine has kind === "child" branch, parent_run_id linkage, getChildRun + wakeParentForChild store methods, hard cancel propagation parent→children via operator routes.
+  Current state: engine has kind === "child" branch, parent_run_id linkage, getChildRun + wakeParentForChild store methods, hard cancel propagation parent→children via operator routes, and compensation during hard terminate.
   Open: child-failure handling beyond happy path, child timeout, fan-out (parallel children).
 - [~] Cancellation + termination
   Current state: durable cancel route exists, cancelMode column on runs ('graceful' | 'hard'), cancelRunAtBoundary store method, hard termination finalizes the durable run state immediately and prevents in-flight step commits from landing afterward.
@@ -88,7 +85,9 @@ Tier 2 — Postgres-native edge
   Open: TaskStepResult.continueAsNew option that completes current run and starts a new run with continued_from_run_id link; archival job that moves completed-run events older than N days to workflow_archive_events (or external sink) and deletes from hot tables; declarative partitioning above makes archival a partition-drop.
 
 Tier 3 — differentiation
-- [ ] Mermaid live render of run state with current step highlighted
+- [~] Mermaid live render of run state with current step highlighted
+  Current state: dashboard renders Mermaid workflow definitions and run detail views with live SSE-backed updates.
+  Open: stronger current-step visualization and richer execution overlays on the rendered graph.
 - [ ] Time-travel replay (snapshot rewind / fork — Path A)
   Add step_seq monotonic column + context_before snapshot on workflow_step_attempts; POST /v1/runs/:runId/rewind { toAttemptId } and POST /v1/runs/:runId/fork { fromAttemptId }; preserve forward events as branched_from.
 - [ ] Human-in-the-loop task with URL + expiry
@@ -159,7 +158,7 @@ Tier 5 — DX parity with Trigger.dev (this is the actual pitch)
   Driver feedback: "Temporal too complicated to set up. Trigger.dev easier, better local/staging/prod handling."
   Goal: 5 minutes from `git clone` to seeing a workflow execute. Same config working locally, staging, prod with no rewrites.
 - [~] `npx hippo init` scaffold command
-  Current state: local `hippo dev` foundation exists in-repo (`docker-compose.yml`, `.env.example`, tested `hippo:dev` orchestration). Packaging and starter generation still need the actual `init` command.
+  Current state: scaffold command exists in-repo today via `npm run hippo:init -- <dir>` and generates a runnable starter with `docker-compose.yml`, `.env`, `src/workflows/example.ts`, scripts, and README. The global `npx hippo init` shape stays blocked on packaging/publishing.
   Creates: docker-compose.yml (Postgres + hippo container), .env with safe defaults, src/workflows/example.ts, package.json scripts, README. One command, working demo.
 - [x] `hippo dev` — single command starts everything
   Spawns Postgres via docker-compose (if not running), runs migrations, starts hippo server + worker with hot-reload of workflows (tsx watch). Logs colored, structured.
@@ -172,14 +171,14 @@ Tier 5 — DX parity with Trigger.dev (this is the actual pitch)
     - Live tail of events via SSE
     - Operator actions: cancel, retry, rewind, fork (when Time-travel ships)
   No auth in dev (loopback only). Token auth in prod (reuse HIPPO_API_TOKEN).
-- [ ] Environment story: local / staging / prod parity
-  Current state: `HIPPO_ENV=dev|staging|prod` is parsed centrally and non-dev now enforces `HIPPO_API_TOKEN` plus `HIPPO_CALLBACK_SECRET` at startup.
+- [~] Environment story: local / staging / prod parity
+  Current state: `HIPPO_ENV=dev|staging|prod` is parsed centrally and non-dev now enforces `HIPPO_API_TOKEN` plus `HIPPO_CALLBACK_SECRET` at startup. `.env.example`, `.env.staging.example`, and `.env.prod.example` now document the baseline matrix, and deploy notes live in `docs/deploy.md`.
   Same code, env vars switch behaviour. Document the matrix:
     - DATABASE_URL                  → which Postgres
     - HIPPO_ENV=dev|staging|prod    → log level, auth strictness, dashboard auth
     - HIPPO_API_TOKEN / SECRET      → required in non-dev
     - HIPPO_HMAC_SKEW_SECONDS       → callback clock skew tolerance
-  Provide `.env.example` for each env. Document deploy recipes for Fly.io, Railway, Render, plain Docker.
+  Open: validate the env matrix from a freshly scaffolded app and keep deploy docs aligned as process-model changes land.
 - [x] Realtime run status streaming (SSE)
   GET /v1/runs/:runId/stream → SSE of events as they happen. Use LISTEN/NOTIFY on workflow_events insert. Both dashboard and client SDK consume.
 - [ ] Hot-reload workflow registration in dev
@@ -190,10 +189,12 @@ Tier 5 — DX parity with Trigger.dev (this is the actual pitch)
   - Cron-triggered nightly report
   - Long-running approval (signal + wait + expiry)
   - Fan-out via child workflows (when child workflows ship)
-- [ ] Deployment recipes
-  Production-ready docker-compose, Fly.toml, railway.json, render.yaml. Single-container option for trivial deploys. Multi-container option (api + N workers) for scale.
-- [ ] README quickstart < 5 minutes
-  `npx hippo init my-app && cd my-app && npx hippo dev` → open http://localhost:3000/dashboard, click "Run example workflow", see it execute.
+- [~] Deployment recipes
+  Current state: single-container deploy recipes now exist via `Dockerfile`, `fly.toml`, `railway.json`, `render.yaml`, plus `docs/deploy.md`.
+  Open: multi-container option (`api + N workers`) once `hippo server` / `hippo worker` split lands.
+- [~] README quickstart < 5 minutes
+  Current state: top-level README now describes the truthful source-repo flow (`npm run hippo:init -- my-app`), dashboard entrypoint, and example run command.
+  Open: switch the docs to `npx hippo init my-app` once the CLI is packaged and published.
 - [ ] CLI ergonomics
   `hippo runs ls`, `hippo runs show <id>`, `hippo runs cancel <id>`, `hippo workflows ls`, `hippo workflows render <name>` — operator CLI parity with dashboard, scriptable.
 

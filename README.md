@@ -32,7 +32,7 @@ A parent run can spawn a child workflow, wait durably for its terminal state, an
 </td>
 <td align="center">
 <h3>🛑 Graceful Cancel And Hard Terminate</h3>
-Graceful cancellation stops at step boundaries. Hard termination cuts the run over to `canceled` immediately and propagates down child runs.
+Graceful cancellation stops at step boundaries. Hard termination cuts the run over to `canceled` immediately, propagates down child runs, and runs compensation for completed task steps that define it.
 </td>
 </tr>
 <tr>
@@ -53,10 +53,11 @@ Transactional steps can enqueue outbox records in the same transaction as step p
 
 ## Quickstart
 
-Scaffold a new Hippo app:
+From this repo today, scaffold a new Hippo app:
 
 ```bash
-npx hippo init my-hippo-app
+npm install
+npm run hippo:init -- my-hippo-app
 cd my-hippo-app
 npm install
 npm run hippo:dev
@@ -64,6 +65,23 @@ npm run hippo:dev
 
 This creates a local app skeleton with Docker-backed Postgres, the built-in
 dashboard, and an example workflow under `src/workflows/example.ts`.
+
+Then open `http://127.0.0.1:3000/dashboard` and start an example run:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer demo-token" \
+  -H "Content-Type: application/json" \
+  http://127.0.0.1:3000/v1/workflows/example-delivery/runs \
+  -d '{"email":"hello@example.com"}'
+```
+
+The generated app includes:
+
+- built-in dashboard with Mermaid workflow renders and SSE event tails
+- durable retries with exponential backoff, jitter, and max delay cap
+- graceful cancel, hard terminate, and compensation hooks
+- local `docker compose` Postgres plus migrations and example workflow wiring
 
 Required environment:
 
@@ -85,6 +103,12 @@ Optional environment:
 - `HIPPO_CALLBACK_SECRET`
 - `HIPPO_CALLBACK_TOLERANCE_SECONDS`
 
+Environment-specific examples:
+
+- `.env.example`
+- `.env.staging.example`
+- `.env.prod.example`
+
 Development:
 
 ```bash
@@ -101,6 +125,14 @@ Environment modes:
 - `HIPPO_ENV=dev` keeps local defaults permissive.
 - `HIPPO_ENV=staging` and `HIPPO_ENV=prod` require both `HIPPO_API_TOKEN`
   and `HIPPO_CALLBACK_SECRET`.
+
+Deployment recipes:
+
+- [docs/deploy.md](docs/deploy.md)
+- `Dockerfile`
+- `fly.toml`
+- `railway.json`
+- `render.yaml`
 
 If you prefer the steps manually:
 

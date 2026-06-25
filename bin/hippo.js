@@ -163,7 +163,7 @@ console.log(renderWorkflowAsMermaid(exampleWorkflow))
 
 const createScaffoldReadme = (projectName) => `# ${projectName}
 
-Bootstrapped by \`npx hippo init\`.
+Bootstrapped by \`hippo init\`.
 
 ## Quickstart
 

@@ -10,7 +10,6 @@ import type {
   WaitStepResumeResult,
   WorkflowDefinition,
   WorkflowRunRecord,
-  WorkflowStepAttemptRecord,
 } from "../types/workflow.js"
 import type { HippoMetrics } from "./metrics.js"
 import { LostLeaseError, type WorkflowStore } from "./workflow-store.js"

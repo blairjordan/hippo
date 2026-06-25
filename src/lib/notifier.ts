@@ -31,7 +31,9 @@ const parseNotification = (payload: string): WorkflowNotification => {
     if (parsed.kind === "runnable") {
       return { kind: "runnable" }
     }
-  } catch {}
+  } catch {
+    return { kind: "runnable" }
+  }
 
   return { kind: "runnable" }
 }

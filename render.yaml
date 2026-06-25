@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: hippo
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    autoDeploy: true
+    healthCheckPath: /healthz
+    envVars:
+      - key: HIPPO_ENV
+        value: prod
+      - key: HIPPO_HOST
+        value: 0.0.0.0
+      - key: HIPPO_PORT
+        value: 3000
+      - key: DATABASE_URL
+        sync: false
+      - key: HIPPO_API_TOKEN
+        sync: false
+      - key: HIPPO_CALLBACK_SECRET
+        sync: false

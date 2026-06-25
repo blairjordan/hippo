@@ -40,6 +40,6 @@ describe("hippo init cli", () => {
     )
     expect(workflowIndex).toContain("exampleWorkflow")
     expect(workflowFile).toContain('name: "example-delivery"')
-    expect(readme).toContain("npx hippo init")
+    expect(readme).toContain("hippo init")
   })
 })

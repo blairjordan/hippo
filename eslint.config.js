@@ -5,15 +5,22 @@ import tsPlugin from "@typescript-eslint/eslint-plugin"
 export default [
   eslint.configs.recommended,
   {
-    files: ["**/*.ts"],
     languageOptions: {
-      parser: tsParser,
       globals: {
+        URL: "readonly",
+        clearInterval: "readonly",
         clearTimeout: "readonly",
         console: "readonly",
         process: "readonly",
+        setInterval: "readonly",
         setTimeout: "readonly",
       },
+    },
+  },
+  {
+    files: ["**/*.ts"],
+    languageOptions: {
+      parser: tsParser,
       parserOptions: {
         project: "./tsconfig.json",
       },
@@ -23,6 +30,7 @@ export default [
     },
     rules: {
       ...tsPlugin.configs.recommended.rules,
+      "no-undef": "off",
       "@typescript-eslint/consistent-type-imports": [
         "error",
         { prefer: "type-imports" },
@@ -34,6 +42,6 @@ export default [
     },
   },
   {
-    ignores: ["dist/**", "node_modules/**"],
+    ignores: ["dist/**", "node_modules/**", "src/queries/**"],
   },
 ]
