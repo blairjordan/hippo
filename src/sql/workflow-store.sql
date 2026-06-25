@@ -32,6 +32,9 @@ RETURNING
   parent_run_id AS "parentRunId",
   parent_step_key AS "parentStepKey",
   continued_from_run_id AS "continuedFromRunId",
+  branched_from_run_id AS "branchedFromRunId",
+  branched_from_attempt_id AS "branchedFromAttemptId",
+  superseded_by_run_id AS "supersededByRunId",
   definition_name AS "definitionName",
   definition_version AS "definitionVersion",
   task_queue AS "taskQueue",
@@ -52,6 +55,12 @@ RETURNING
 /* @name GetRunById */
 SELECT
   id,
+  parent_run_id AS "parentRunId",
+  parent_step_key AS "parentStepKey",
+  continued_from_run_id AS "continuedFromRunId",
+  branched_from_run_id AS "branchedFromRunId",
+  branched_from_attempt_id AS "branchedFromAttemptId",
+  superseded_by_run_id AS "supersededByRunId",
   definition_name AS "definitionName",
   definition_version AS "definitionVersion",
   task_queue AS "taskQueue",
@@ -64,6 +73,8 @@ SELECT
   error,
   lease_owner AS "leaseOwner",
   lease_expires_at AS "leaseExpiresAt",
+  cancel_requested_at AS "cancelRequestedAt",
+  cancel_mode AS "cancelMode",
   available_at AS "availableAt",
   created_at AS "createdAt",
   updated_at AS "updatedAt",
@@ -89,8 +100,10 @@ SELECT
   run_id AS "runId",
   step_key AS "stepKey",
   kind,
+  step_seq AS "stepSeq",
   attempt,
   status,
+  context_before AS "contextBefore",
   input,
   output,
   error,
@@ -101,7 +114,7 @@ SELECT
   updated_at AS "updatedAt"
 FROM workflow_step_attempts
 WHERE run_id = :runId
-ORDER BY created_at ASC, attempt ASC;
+ORDER BY step_seq ASC, attempt ASC, created_at ASC;
 
 /* @name InsertEvent */
 INSERT INTO workflow_events (
@@ -170,20 +183,29 @@ WHERE run_id = :runId
   AND step_key = :stepKey
   AND kind = :kind;
 
+/* @name GetLastStepSequence */
+SELECT COALESCE(MAX(step_seq), 0)::int AS "lastStepSeq"
+FROM workflow_step_attempts
+WHERE run_id = :runId;
+
 /* @name InsertStepAttempt */
 INSERT INTO workflow_step_attempts (
   run_id,
   step_key,
   kind,
+  step_seq,
   attempt,
   status,
+  context_before,
   input
 ) VALUES (
   :runId,
   :stepKey,
   :kind,
+  :stepSeq,
   :attempt,
   'started',
+  :contextBefore,
   :input
 )
 RETURNING
@@ -191,8 +213,10 @@ RETURNING
   run_id AS "runId",
   step_key AS "stepKey",
   kind,
+  step_seq AS "stepSeq",
   attempt,
   status,
+  context_before AS "contextBefore",
   input,
   output,
   error,
@@ -201,6 +225,113 @@ RETURNING
   completed_at AS "completedAt",
   created_at AS "createdAt",
   updated_at AS "updatedAt";
+
+/* @name GetStepAttemptByIdForRun */
+SELECT
+  id,
+  run_id AS "runId",
+  step_key AS "stepKey",
+  kind,
+  step_seq AS "stepSeq",
+  attempt,
+  status,
+  context_before AS "contextBefore",
+  input,
+  output,
+  error,
+  started_at AS "startedAt",
+  last_heartbeat_at AS "lastHeartbeatAt",
+  completed_at AS "completedAt",
+  created_at AS "createdAt",
+  updated_at AS "updatedAt"
+FROM workflow_step_attempts
+WHERE run_id = :runId
+  AND id = :attemptId;
+
+/* @name InsertBranchedRun */
+INSERT INTO workflow_runs (
+  branched_from_run_id,
+  branched_from_attempt_id,
+  definition_name,
+  definition_version,
+  task_queue,
+  priority,
+  status,
+  current_step_key,
+  input,
+  context
+) VALUES (
+  :branchedFromRunId,
+  :branchedFromAttemptId,
+  :definitionName,
+  :definitionVersion,
+  :taskQueue,
+  :priority,
+  'queued',
+  :currentStepKey,
+  :input,
+  :context
+)
+RETURNING
+  id,
+  parent_run_id AS "parentRunId",
+  parent_step_key AS "parentStepKey",
+  continued_from_run_id AS "continuedFromRunId",
+  branched_from_run_id AS "branchedFromRunId",
+  branched_from_attempt_id AS "branchedFromAttemptId",
+  superseded_by_run_id AS "supersededByRunId",
+  definition_name AS "definitionName",
+  definition_version AS "definitionVersion",
+  task_queue AS "taskQueue",
+  priority,
+  status,
+  current_step_key AS "currentStepKey",
+  input,
+  context,
+  result,
+  error,
+  lease_owner AS "leaseOwner",
+  lease_expires_at AS "leaseExpiresAt",
+  cancel_requested_at AS "cancelRequestedAt",
+  cancel_mode AS "cancelMode",
+  available_at AS "availableAt",
+  created_at AS "createdAt",
+  updated_at AS "updatedAt",
+  completed_at AS "completedAt";
+
+/* @name MarkRunSuperseded */
+UPDATE workflow_runs
+SET
+  superseded_by_run_id = :supersededByRunId,
+  updated_at = now()
+WHERE id = :runId
+  AND superseded_by_run_id IS NULL
+RETURNING
+  id,
+  parent_run_id AS "parentRunId",
+  parent_step_key AS "parentStepKey",
+  continued_from_run_id AS "continuedFromRunId",
+  branched_from_run_id AS "branchedFromRunId",
+  branched_from_attempt_id AS "branchedFromAttemptId",
+  superseded_by_run_id AS "supersededByRunId",
+  definition_name AS "definitionName",
+  definition_version AS "definitionVersion",
+  task_queue AS "taskQueue",
+  priority,
+  status,
+  current_step_key AS "currentStepKey",
+  input,
+  context,
+  result,
+  error,
+  lease_owner AS "leaseOwner",
+  lease_expires_at AS "leaseExpiresAt",
+  cancel_requested_at AS "cancelRequestedAt",
+  cancel_mode AS "cancelMode",
+  available_at AS "availableAt",
+  created_at AS "createdAt",
+  updated_at AS "updatedAt",
+  completed_at AS "completedAt";
 
 /* @name CompleteStandaloneStepAttempt */
 UPDATE workflow_step_attempts
@@ -617,6 +748,12 @@ FOR UPDATE;
 /* @name GetRunByIdForUpdate */
 SELECT
   id,
+  parent_run_id AS "parentRunId",
+  parent_step_key AS "parentStepKey",
+  continued_from_run_id AS "continuedFromRunId",
+  branched_from_run_id AS "branchedFromRunId",
+  branched_from_attempt_id AS "branchedFromAttemptId",
+  superseded_by_run_id AS "supersededByRunId",
   definition_name AS "definitionName",
   definition_version AS "definitionVersion",
   task_queue AS "taskQueue",
@@ -629,6 +766,8 @@ SELECT
   error,
   lease_owner AS "leaseOwner",
   lease_expires_at AS "leaseExpiresAt",
+  cancel_requested_at AS "cancelRequestedAt",
+  cancel_mode AS "cancelMode",
   available_at AS "availableAt",
   created_at AS "createdAt",
   updated_at AS "updatedAt",

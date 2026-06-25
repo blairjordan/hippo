@@ -169,6 +169,8 @@ const createStoreStub = () => {
         runId: args.runId,
         stepKey: args.stepKey,
         kind,
+        stepSeq: attempts.filter((candidate) => candidate.runId === args.runId)
+          .length + 1,
         attempt:
           attempts.filter(
             (candidate) =>
@@ -177,6 +179,7 @@ const createStoreStub = () => {
               candidate.kind === kind
           ).length + 1,
         status: "started",
+        contextBefore: runs.get(args.runId)?.context ?? {},
         input: args.input,
         output: null,
         error: null,
@@ -249,6 +252,9 @@ const createStoreStub = () => {
         parentRunId: null,
         parentStepKey: null,
         continuedFromRunId: run.id,
+        branchedFromRunId: null,
+        branchedFromAttemptId: null,
+        supersededByRunId: null,
         definitionName: run.definitionName,
         definitionVersion: run.definitionVersion,
         taskQueue: args.taskQueue,
@@ -763,6 +769,9 @@ const createStoreStub = () => {
     async requestCancelRun() {
       throw new Error("not used")
     },
+    async branchRun() {
+      throw new Error("not used")
+    },
     async startRun(args: {
       parentRunId?: string | null
       parentStepKey?: string | null
@@ -778,6 +787,9 @@ const createStoreStub = () => {
         parentRunId: args.parentRunId ?? null,
         parentStepKey: args.parentStepKey ?? null,
         continuedFromRunId: null,
+        branchedFromRunId: null,
+        branchedFromAttemptId: null,
+        supersededByRunId: null,
         definitionName: args.definitionName,
         definitionVersion: args.definitionVersion,
         taskQueue: args.taskQueue,

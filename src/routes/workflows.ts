@@ -89,6 +89,21 @@ const reconcileBodySchema = z.object({
   limit: z.coerce.number().int().positive().max(1_000).default(100),
 })
 
+const rewindRunBodySchema = z.object({
+  toAttemptId: z.uuid(),
+})
+
+const forkRunBodySchema = z.object({
+  fromAttemptId: z.uuid(),
+})
+
+const terminalRunStatuses = new Set([
+  "completed",
+  "failed",
+  "compensation_failed",
+  "canceled",
+])
+
 const dashboardRunPath = (runId: string) => `/dashboard/runs/${runId}`
 
 const escapeHtml = (value: string) =>
@@ -1375,6 +1390,76 @@ export const createWorkflowRoutes = (args: {
     reply.code(202)
     return {
       runId: run.id,
+      status: run.status,
+      currentStepKey: run.currentStepKey,
+    }
+  })
+
+  app.post("/v1/operators/runs/:runId/rewind", async (request, reply) => {
+    requireApiAuth(app, request, args.auth)
+
+    const params = runIdParamsSchema.parse(request.params)
+    const body = rewindRunBodySchema.parse(request.body ?? {})
+    const existingRun = await getExistingRun(app, args.store, params.runId)
+
+    if (!terminalRunStatuses.has(existingRun.status)) {
+      throw app.httpErrors.conflict(
+        `Run "${params.runId}" must be terminal before rewind`
+      )
+    }
+
+    if (existingRun.supersededByRunId) {
+      throw app.httpErrors.conflict(
+        `Run "${params.runId}" has already been rewound`
+      )
+    }
+
+    const run = await args.store.branchRun({
+      runId: params.runId,
+      attemptId: body.toAttemptId,
+      mode: "rewind",
+    })
+
+    if (!run) {
+      throw app.httpErrors.notFound(`Run "${params.runId}" not found`)
+    }
+
+    reply.code(202)
+    return {
+      runId: run.id,
+      sourceRunId: params.runId,
+      status: run.status,
+      currentStepKey: run.currentStepKey,
+    }
+  })
+
+  app.post("/v1/operators/runs/:runId/fork", async (request, reply) => {
+    requireApiAuth(app, request, args.auth)
+
+    const params = runIdParamsSchema.parse(request.params)
+    const body = forkRunBodySchema.parse(request.body ?? {})
+    const existingRun = await getExistingRun(app, args.store, params.runId)
+
+    if (!terminalRunStatuses.has(existingRun.status)) {
+      throw app.httpErrors.conflict(
+        `Run "${params.runId}" must be terminal before fork`
+      )
+    }
+
+    const run = await args.store.branchRun({
+      runId: params.runId,
+      attemptId: body.fromAttemptId,
+      mode: "fork",
+    })
+
+    if (!run) {
+      throw app.httpErrors.notFound(`Run "${params.runId}" not found`)
+    }
+
+    reply.code(202)
+    return {
+      runId: run.id,
+      sourceRunId: params.runId,
       status: run.status,
       currentStepKey: run.currentStepKey,
     }

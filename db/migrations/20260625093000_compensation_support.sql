@@ -19,13 +19,23 @@ ALTER TABLE workflow_step_attempts
 ALTER TABLE workflow_step_attempts
   DROP CONSTRAINT IF EXISTS workflow_step_attempts_run_id_step_key_attempt_key;
 
-ALTER TABLE workflow_step_attempts
-  ADD CONSTRAINT workflow_step_attempts_run_id_step_key_kind_attempt_key
-  UNIQUE (run_id, step_key, kind, attempt);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'workflow_step_attempts_run_id_step_key_kind_attempt_key'
+  ) THEN
+    ALTER TABLE workflow_step_attempts
+      ADD CONSTRAINT workflow_step_attempts_run_id_step_key_kind_attempt_key
+      UNIQUE (run_id, step_key, kind, attempt);
+  END IF;
+END
+$$;
 
 DROP INDEX IF EXISTS workflow_step_attempts_run_id_idx;
 
-CREATE INDEX workflow_step_attempts_run_id_idx
+CREATE INDEX IF NOT EXISTS workflow_step_attempts_run_id_idx
   ON workflow_step_attempts (run_id, step_key, kind, attempt DESC);
 
 -- migrate:down

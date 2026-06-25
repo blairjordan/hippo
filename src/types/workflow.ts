@@ -20,6 +20,9 @@ export type WorkflowRunRecord = {
   parentRunId: string | null
   parentStepKey: string | null
   continuedFromRunId: string | null
+  branchedFromRunId: string | null
+  branchedFromAttemptId: string | null
+  supersededByRunId: string | null
   definitionName: string
   definitionVersion: number
   taskQueue: string
@@ -69,8 +72,10 @@ export type WorkflowStepAttemptRecord = {
   runId: string
   stepKey: string
   kind: StepAttemptKind
+  stepSeq: number
   attempt: number
   status: StepAttemptStatus
+  contextBefore: JsonObject
   input: JsonObject
   output: JsonValue | null
   error: JsonValue | null

@@ -342,5 +342,102 @@ describe.skipIf(!testDatabaseUrl)("workflow store postgres integration", () => {
     expect(
       events.filter((event) => event.eventType === "run.started")
     ).toHaveLength(1)
+
+    await drainEngine(engine)
+  })
+
+  it("rewinds and forks from a stored attempt snapshot", async () => {
+    const workflow = defineWorkflow({
+      name: "rewind-fork-example",
+      version: 1,
+      startAt: "first",
+      steps: {
+        first: taskStep({
+          kind: "task",
+          next: "second",
+          run: () => ({
+            patch: {
+              count: 1,
+            },
+          }),
+        }),
+        second: taskStep({
+          kind: "task",
+          next: "done",
+          run: (context) => ({
+            patch: {
+              count: Number(context.context.count ?? 0) + 1,
+            },
+          }),
+        }),
+        done: endStep(),
+      },
+    })
+    const engine = createWorkflowEngine({
+      definitions: [workflow],
+      metrics: createMetrics(),
+      store,
+    })
+
+    const sourceRun = await engine.startRun({
+      workflowName: workflow.name,
+      payload: {},
+    })
+
+    await drainEngine(engine)
+
+    const sourceAttempts = await store.getRunAttempts(sourceRun.id)
+    const secondAttempt = sourceAttempts.find(
+      (attempt) => attempt.stepKey === "second"
+    )
+
+    expect(secondAttempt?.contextBefore).toEqual({ count: 1 })
+
+    const rewoundRun = await store.branchRun({
+      runId: sourceRun.id,
+      attemptId: secondAttempt?.id ?? "",
+      mode: "rewind",
+    })
+
+    expect(rewoundRun).not.toBeNull()
+    expect(rewoundRun?.currentStepKey).toBe("second")
+    expect(rewoundRun?.context).toEqual({ count: 1 })
+
+    const updatedSourceRun = await store.getRun(sourceRun.id)
+
+    expect(updatedSourceRun?.supersededByRunId).toBe(rewoundRun?.id ?? null)
+
+    await drainEngine(engine)
+
+    const completedRewoundRun = await store.getRun(rewoundRun?.id ?? "")
+
+    expect(completedRewoundRun?.status).toBe("completed")
+    expect(completedRewoundRun?.context.count).toBe(2)
+
+    const forkedRun = await store.branchRun({
+      runId: sourceRun.id,
+      attemptId: secondAttempt?.id ?? "",
+      mode: "fork",
+    })
+
+    expect(forkedRun).not.toBeNull()
+    expect(forkedRun?.currentStepKey).toBe("second")
+    expect(forkedRun?.context).toEqual({ count: 1 })
+
+    await drainEngine(engine)
+
+    const completedForkedRun = await store.getRun(forkedRun?.id ?? "")
+
+    expect(completedForkedRun?.status).toBe("completed")
+    expect(completedForkedRun?.context.count).toBe(2)
+
+    const sourceEvents = await store.getRunEvents(sourceRun.id)
+
+    expect(sourceEvents.some((event) => event.eventType === "run.rewound")).toBe(
+      true
+    )
+    expect(sourceEvents.some((event) => event.eventType === "run.forked")).toBe(
+      true
+    )
   })
 })

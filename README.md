@@ -80,6 +80,10 @@ Transactional task steps can write application data and commit workflow progress
 <h3>📦 Outbox Helper</h3>
 Transactional steps can enqueue outbox records in the same transaction as step progress. A drain loop can deliver and mark them later.
 </td>
+<td align="center">
+<h3>⏪ Rewind And Fork</h3>
+Terminal runs can branch from a prior step attempt using the stored pre-step context snapshot, which gives operators a durable way to replay from an earlier boundary without mutating workflow code.
+</td>
 </tr>
 </table>
 
@@ -237,6 +241,22 @@ curl -X POST \
   -d '{"reason":"operator request"}'
 ```
 
+Rewind or fork a terminal run from a prior attempt:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer $HIPPO_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  http://127.0.0.1:3000/v1/operators/runs/<run-id>/rewind \
+  -d '{"toAttemptId":"<attempt-id>"}'
+
+curl -X POST \
+  -H "Authorization: Bearer $HIPPO_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  http://127.0.0.1:3000/v1/operators/runs/<run-id>/fork \
+  -d '{"fromAttemptId":"<attempt-id>"}'
+```
+
 Render a workflow as Mermaid:
 
 ```bash
@@ -256,6 +276,6 @@ npm run lint
 Postgres-backed integration tests:
 
 ```bash
-HIPPO_PG_TEST_URL=postgres://postgres:postgres@127.0.0.1:54322/postgres \
+HIPPO_PG_TEST_URL=postgres://postgres:postgres@127.0.0.1:55432/postgres \
   npm run test -- src/lib/workflow-store.pg.test.ts
 ```

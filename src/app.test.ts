@@ -23,6 +23,9 @@ const createRunRecord = (
   parentRunId: null,
   parentStepKey: null,
   continuedFromRunId: null,
+  branchedFromRunId: null,
+  branchedFromAttemptId: null,
+  supersededByRunId: null,
   definitionName: demoWorkflow.name,
   definitionVersion: demoWorkflow.version,
   taskQueue: "default",
@@ -61,6 +64,13 @@ const createStoreStub = (healthy: boolean | Error = true) => ({
   },
   async beginStepAttempt() {
     throw new Error("not used")
+  },
+  async branchRun() {
+    return createRunRecord({
+      id: "run-branched",
+      currentStepKey: "send-email",
+      status: "queued",
+    })
   },
   async cancelRun() {
     return createRunRecord({ status: "canceled" })
@@ -315,8 +325,10 @@ describe("app routes", () => {
             runId: "run-1",
             stepKey: "send-email",
             kind: "forward",
+            stepSeq: 1,
             attempt: 1,
             status: "completed",
+            contextBefore: {},
             input: {},
             output: { accepted: true },
             error: null,
@@ -652,5 +664,115 @@ describe("app routes", () => {
     expect(runCompensation).toHaveBeenCalledWith(run.id)
 
     await terminateApp.close()
+  })
+
+  it("rewinds a terminal run from a prior attempt", async () => {
+    const run = createRunRecord({
+      id: "11111111-1111-4111-8111-333333333333",
+      status: "failed",
+      currentStepKey: "delivery-confirmation",
+    })
+    const branchRun = vi.fn(async () =>
+      createRunRecord({
+        id: "22222222-2222-4222-8222-222222222222",
+        branchedFromRunId: run.id,
+        branchedFromAttemptId: "attempt-1",
+        currentStepKey: "send-email",
+        status: "queued",
+      })
+    )
+    const store = {
+      ...createStoreStub(),
+      branchRun,
+      async getRun() {
+        return run
+      },
+    }
+    const rewindApp = createApp({
+      auth: createAuth(),
+      engine: createWorkflowEngine({
+        definitions: [demoWorkflow],
+        metrics: createMetrics(),
+        store,
+      }),
+      metrics: createMetrics(),
+      store,
+    })
+
+    const response = await rewindApp.inject({
+      method: "POST",
+      url: `/v1/operators/runs/${run.id}/rewind`,
+      payload: { toAttemptId: "11111111-1111-4111-8111-444444444444" },
+    })
+
+    expect(response.statusCode).toBe(202)
+    expect(response.json()).toEqual({
+      runId: "22222222-2222-4222-8222-222222222222",
+      sourceRunId: run.id,
+      status: "queued",
+      currentStepKey: "send-email",
+    })
+    expect(branchRun).toHaveBeenCalledWith({
+      runId: run.id,
+      attemptId: "11111111-1111-4111-8111-444444444444",
+      mode: "rewind",
+    })
+
+    await rewindApp.close()
+  })
+
+  it("forks a terminal run from a prior attempt", async () => {
+    const run = createRunRecord({
+      id: "11111111-1111-4111-8111-555555555555",
+      status: "completed",
+      currentStepKey: null,
+    })
+    const branchRun = vi.fn(async () =>
+      createRunRecord({
+        id: "22222222-2222-4222-8222-666666666666",
+        branchedFromRunId: run.id,
+        branchedFromAttemptId: "attempt-2",
+        currentStepKey: "send-webhook",
+        status: "queued",
+      })
+    )
+    const store = {
+      ...createStoreStub(),
+      branchRun,
+      async getRun() {
+        return run
+      },
+    }
+    const forkApp = createApp({
+      auth: createAuth(),
+      engine: createWorkflowEngine({
+        definitions: [demoWorkflow],
+        metrics: createMetrics(),
+        store,
+      }),
+      metrics: createMetrics(),
+      store,
+    })
+
+    const response = await forkApp.inject({
+      method: "POST",
+      url: `/v1/operators/runs/${run.id}/fork`,
+      payload: { fromAttemptId: "11111111-1111-4111-8111-777777777777" },
+    })
+
+    expect(response.statusCode).toBe(202)
+    expect(response.json()).toEqual({
+      runId: "22222222-2222-4222-8222-666666666666",
+      sourceRunId: run.id,
+      status: "queued",
+      currentStepKey: "send-webhook",
+    })
+    expect(branchRun).toHaveBeenCalledWith({
+      runId: run.id,
+      attemptId: "11111111-1111-4111-8111-777777777777",
+      mode: "fork",
+    })
+
+    await forkApp.close()
   })
 })

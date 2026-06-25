@@ -1,14 +1,14 @@
 -- migrate:up
 ALTER TABLE workflow_runs
-  ADD COLUMN task_queue TEXT NOT NULL DEFAULT 'default',
-  ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
+  ADD COLUMN IF NOT EXISTS task_queue TEXT NOT NULL DEFAULT 'default',
+  ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 0;
 
-CREATE INDEX workflow_runs_task_queue_priority_available_at_idx
+CREATE INDEX IF NOT EXISTS workflow_runs_task_queue_priority_available_at_idx
   ON workflow_runs (task_queue, priority DESC, available_at, created_at);
 
 ALTER TABLE workflow_schedules
-  ADD COLUMN task_queue TEXT NOT NULL DEFAULT 'default',
-  ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
+  ADD COLUMN IF NOT EXISTS task_queue TEXT NOT NULL DEFAULT 'default',
+  ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 0;
 
 -- migrate:down
 ALTER TABLE workflow_schedules

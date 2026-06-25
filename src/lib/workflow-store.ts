@@ -15,18 +15,22 @@ import {
   failRun as failRunQuery,
   failStandaloneStepAttempt as failStandaloneStepAttemptQuery,
   getLastStepAttempt as getLastStepAttemptQuery,
+  getLastStepSequence as getLastStepSequenceQuery,
   getOpenWaitForUpdate as getOpenWaitForUpdateQuery,
   getRunById as getRunByIdQuery,
   getRunByIdForUpdate as getRunByIdForUpdateQuery,
   getRunAttempts as getRunAttemptsQuery,
   getRunEvents as getRunEventsQuery,
+  getStepAttemptByIdForRun as getStepAttemptByIdForRunQuery,
   insertEvent as insertEventQuery,
+  insertBranchedRun as insertBranchedRunQuery,
   insertRun as insertRunQuery,
   insertStepAttempt as insertStepAttemptQuery,
   listActiveRuns as listActiveRunsQuery,
   listFailedRuns as listFailedRunsQuery,
   listStuckRuns as listStuckRunsQuery,
   markRunCompensationFailed as markRunCompensationFailedQuery,
+  markRunSuperseded as markRunSupersededQuery,
   openWait as openWaitQuery,
   ping as pingQuery,
   recoverExpiredLeases as recoverExpiredLeasesQuery,
@@ -59,6 +63,9 @@ type IRunRow = {
   parentRunId?: string | null
   parentStepKey?: string | null
   continuedFromRunId?: string | null
+  branchedFromRunId?: string | null
+  branchedFromAttemptId?: string | null
+  supersededByRunId?: string | null
   definitionName: string
   definitionVersion: number
   taskQueue?: string
@@ -84,8 +91,10 @@ type IAttemptRow = {
   runId: string
   stepKey: string
   kind: StepAttemptKind
+  stepSeq?: number
   attempt: number
   status: string
+  contextBefore?: JsonValue
   input: JsonValue
   output: JsonValue | null
   error: JsonValue | null
@@ -144,6 +153,9 @@ const mapRun = (row: IRunRow): WorkflowRunRecord => ({
       ? row.parentStepKey
       : null,
   continuedFromRunId: row.continuedFromRunId ?? null,
+  branchedFromRunId: row.branchedFromRunId ?? null,
+  branchedFromAttemptId: row.branchedFromAttemptId ?? null,
+  supersededByRunId: row.supersededByRunId ?? null,
   taskQueue: row.taskQueue ?? "default",
   priority: row.priority ?? 0,
   status: row.status as WorkflowRunStatus,
@@ -158,7 +170,12 @@ const mapRun = (row: IRunRow): WorkflowRunRecord => ({
 const mapAttempt = (row: IAttemptRow): WorkflowStepAttemptRecord => ({
   ...row,
   kind: row.kind as StepAttemptKind,
+  stepSeq: row.stepSeq ?? 0,
   status: row.status as StepAttemptStatus,
+  contextBefore: assertJsonObject(
+    row.contextBefore ?? {},
+    "Attempt contextBefore must be a JSON object"
+  ),
   input: assertJsonObject(row.input, "Attempt input must be a JSON object"),
   output: row.output,
   error: row.error,
@@ -205,13 +222,21 @@ const insertAttempt = async (
     { runId: args.runId, stepKey: args.stepKey, kind: args.kind },
     client
   )
+  const [runRow] = await getRunByIdForUpdateQuery.run({ runId: args.runId }, client)
+  const run = mapRun(requireRow(runRow, `Run "${args.runId}" not found`))
+  const [stepSeqRow] = await getLastStepSequenceQuery.run(
+    { runId: args.runId },
+    client
+  )
   const attempt = (countRow?.lastAttempt ?? 0) + 1
   const [row] = await insertStepAttemptQuery.run(
     {
       runId: args.runId,
       stepKey: args.stepKey,
       kind: args.kind,
+      stepSeq: (stepSeqRow?.lastStepSeq ?? 0) + 1,
       attempt,
+      contextBefore: run.context,
       input: args.input,
     },
     client
@@ -262,6 +287,13 @@ const mapOutbox = (row: {
   ...row,
   payload: assertJsonObject(row.payload, "Outbox payload must be a JSON object"),
 })
+
+const terminalRunStatuses = new Set<WorkflowRunStatus>([
+  "completed",
+  "failed",
+  "compensation_failed",
+  "canceled",
+])
 
 const withPromiseTimeout = async <T>(
   promise: Promise<T>,
@@ -2167,6 +2199,119 @@ export const createWorkflowStore = (
     return run
   }
 
+  const branchRun = async (args: {
+    runId: string
+    attemptId: string
+    mode: "rewind" | "fork"
+  }) =>
+    withTransaction(db, async (client) => {
+      const [sourceRunRow] = await getRunByIdForUpdateQuery.run(
+        { runId: args.runId },
+        client
+      )
+
+      if (!sourceRunRow) {
+        return null
+      }
+
+      const sourceRun = mapRun(sourceRunRow)
+
+      if (!terminalRunStatuses.has(sourceRun.status)) {
+        throw new Error(
+          `Run "${args.runId}" must be terminal before ${args.mode}`
+        )
+      }
+
+      if (args.mode === "rewind" && sourceRun.supersededByRunId) {
+        throw new Error(`Run "${args.runId}" has already been rewound`)
+      }
+
+      const [attemptRow] = await getStepAttemptByIdForRunQuery.run(
+        {
+          runId: args.runId,
+          attemptId: args.attemptId,
+        },
+        client
+      )
+
+      if (!attemptRow) {
+        throw new Error(
+          `Attempt "${args.attemptId}" does not belong to run "${args.runId}"`
+        )
+      }
+
+      const attempt = mapAttempt(attemptRow)
+
+      if (attempt.kind !== "forward") {
+        throw new Error("Only forward attempts can be rewound or forked")
+      }
+
+      const [nextRunRow] = await insertBranchedRunQuery.run(
+        {
+          branchedFromRunId: sourceRun.id,
+          branchedFromAttemptId: attempt.id,
+          definitionName: sourceRun.definitionName,
+          definitionVersion: sourceRun.definitionVersion,
+          taskQueue: sourceRun.taskQueue,
+          priority: sourceRun.priority,
+          currentStepKey: attempt.stepKey,
+          input: sourceRun.input,
+          context: attempt.contextBefore,
+        },
+        client
+      )
+
+      const nextRun = mapRun(requireRow(nextRunRow, "Failed to insert branched run"))
+
+      if (args.mode === "rewind") {
+        const [supersededRow] = await markRunSupersededQuery.run(
+          {
+            runId: sourceRun.id,
+            supersededByRunId: nextRun.id,
+          },
+          client
+        )
+
+        if (!supersededRow) {
+          throw new Error(`Run "${args.runId}" could not be marked as rewound`)
+        }
+      }
+
+      await insertEventQuery.run(
+        {
+          runId: sourceRun.id,
+          stepKey: attempt.stepKey,
+          eventType: args.mode === "rewind" ? "run.rewound" : "run.forked",
+          payload: {
+            attemptId: attempt.id,
+            stepKey: attempt.stepKey,
+            branchedRunId: nextRun.id,
+          },
+        },
+        client
+      )
+
+      await insertEventQuery.run(
+        {
+          runId: nextRun.id,
+          stepKey: nextRun.currentStepKey,
+          eventType: "run.started",
+          payload: {
+            branchMode: args.mode,
+            branchedFromRunId: sourceRun.id,
+            branchedFromAttemptId: attempt.id,
+            stepSeq: attempt.stepSeq,
+          },
+        },
+        client
+      )
+
+      await notifyRunnable()
+      await notifyRunEvent(sourceRun.id)
+      await notifyRunEvent(nextRun.id)
+      return nextRun
+    })
+
   const recoverExpiredLeases = async (args: { limit: number }) => {
     const [row] = await recoverExpiredLeasesQuery.run(args, db)
     const reclaimed = requireRow(
@@ -2184,6 +2329,7 @@ export const createWorkflowStore = (
   return {
     advanceTaskStep,
     beginStepAttempt,
+    branchRun,
     cancelRun,
     cancelRunAtBoundary,
     claimNextRunnableRun,

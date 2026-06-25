@@ -34,6 +34,8 @@ CREATE TABLE workflow_runs (
   parent_run_id UUID REFERENCES workflow_runs (id) ON DELETE CASCADE,
   parent_step_key TEXT,
   continued_from_run_id UUID REFERENCES workflow_runs (id) ON DELETE SET NULL,
+  branched_from_run_id UUID REFERENCES workflow_runs (id) ON DELETE SET NULL,
+  superseded_by_run_id UUID REFERENCES workflow_runs (id) ON DELETE SET NULL,
   definition_name TEXT NOT NULL,
   definition_version INTEGER NOT NULL,
   task_queue TEXT NOT NULL DEFAULT 'default',
@@ -72,13 +74,21 @@ CREATE INDEX workflow_runs_parent_run_id_idx
 CREATE INDEX workflow_runs_continued_from_run_id_idx
   ON workflow_runs (continued_from_run_id);
 
+CREATE INDEX workflow_runs_branched_from_run_id_idx
+  ON workflow_runs (branched_from_run_id);
+
+CREATE INDEX workflow_runs_superseded_by_run_id_idx
+  ON workflow_runs (superseded_by_run_id);
+
 CREATE TABLE workflow_step_attempts (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   run_id UUID NOT NULL REFERENCES workflow_runs (id) ON DELETE CASCADE,
   step_key TEXT NOT NULL,
   kind step_attempt_kind NOT NULL DEFAULT 'forward',
+  step_seq INTEGER NOT NULL,
   attempt INTEGER NOT NULL,
   status step_attempt_status NOT NULL,
+  context_before JSONB NOT NULL DEFAULT '{}'::jsonb,
   input JSONB NOT NULL DEFAULT '{}'::jsonb,
   output JSONB,
   error JSONB,
@@ -92,6 +102,15 @@ CREATE TABLE workflow_step_attempts (
 
 CREATE INDEX workflow_step_attempts_run_id_idx
   ON workflow_step_attempts (run_id, step_key, kind, attempt DESC);
+
+CREATE UNIQUE INDEX workflow_step_attempts_run_id_step_seq_idx
+  ON workflow_step_attempts (run_id, step_seq);
+
+ALTER TABLE workflow_runs
+  ADD COLUMN branched_from_attempt_id UUID REFERENCES workflow_step_attempts (id) ON DELETE SET NULL;
+
+CREATE INDEX workflow_runs_branched_from_attempt_id_idx
+  ON workflow_runs (branched_from_attempt_id);
 
 CREATE TABLE workflow_waits (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
