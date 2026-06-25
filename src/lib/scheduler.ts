@@ -56,6 +56,8 @@ export const startScheduleLoop = (args: {
           await args.engine.startRun({
             workflowName: workflowSchedule.workflowName,
             payload: workflowSchedule.payload,
+            taskQueue: workflowSchedule.taskQueue,
+            priority: workflowSchedule.priority,
           })
         }
       } catch (error) {

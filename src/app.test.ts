@@ -22,8 +22,11 @@ const createRunRecord = (
   id: "run-1",
   parentRunId: null,
   parentStepKey: null,
+  continuedFromRunId: null,
   definitionName: demoWorkflow.name,
   definitionVersion: demoWorkflow.version,
+  taskQueue: "default",
+  priority: 0,
   status: "queued",
   currentStepKey: "wait-for-webhook",
   input: {},
@@ -72,6 +75,9 @@ const createStoreStub = (healthy: boolean | Error = true) => ({
     return []
   },
   async completeRun() {
+    throw new Error("not used")
+  },
+  async continueAsNew() {
     throw new Error("not used")
   },
   async completeStepAttempt() {
@@ -185,6 +191,8 @@ const createStoreStub = (healthy: boolean | Error = true) => ({
     parentStepKey?: string | null
     definitionName: string
     definitionVersion: number
+    taskQueue: string
+    priority: number
     input: JsonObject
     currentStepKey: string
   }) {
@@ -193,6 +201,8 @@ const createStoreStub = (healthy: boolean | Error = true) => ({
       parentStepKey: args.parentStepKey ?? null,
       definitionName: args.definitionName,
       definitionVersion: args.definitionVersion,
+      taskQueue: args.taskQueue,
+      priority: args.priority,
       currentStepKey: args.currentStepKey,
       input: args.input,
     })
@@ -479,6 +489,8 @@ describe("app routes", () => {
         parentStepKey?: string | null
         definitionName: string
         definitionVersion: number
+        taskQueue: string
+        priority: number
         input: JsonObject
         currentStepKey: string
         idempotencyKey?: string | null
@@ -489,6 +501,8 @@ describe("app routes", () => {
         return createRunRecord({
           definitionName: args.definitionName,
           definitionVersion: args.definitionVersion,
+          taskQueue: args.taskQueue,
+          priority: args.priority,
           currentStepKey: args.currentStepKey,
           input: args.input,
         })

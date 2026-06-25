@@ -58,8 +58,11 @@ type IRunRow = {
   id: string
   parentRunId?: string | null
   parentStepKey?: string | null
+  continuedFromRunId?: string | null
   definitionName: string
   definitionVersion: number
+  taskQueue?: string
+  priority?: number
   status: string
   currentStepKey: string | null
   input: JsonValue
@@ -140,6 +143,9 @@ const mapRun = (row: IRunRow): WorkflowRunRecord => ({
     "parentStepKey" in row && typeof row.parentStepKey === "string"
       ? row.parentStepKey
       : null,
+  continuedFromRunId: row.continuedFromRunId ?? null,
+  taskQueue: row.taskQueue ?? "default",
+  priority: row.priority ?? 0,
   status: row.status as WorkflowRunStatus,
   input: assertJsonObject(row.input, "Run input must be a JSON object"),
   context: assertJsonObject(row.context, "Run context must be a JSON object"),
@@ -230,12 +236,16 @@ const mapSchedule = (row: {
   workflowName: string
   cronExpression: string
   payload: JsonValue
+  taskQueue?: string
+  priority?: number
   active: boolean
   nextFireAt: Date
   createdAt: Date
   updatedAt: Date
 }): WorkflowScheduleRecord => ({
   ...row,
+  taskQueue: row.taskQueue ?? "default",
+  priority: row.priority ?? 0,
   payload: assertJsonObject(row.payload, "Schedule payload must be a JSON object"),
 })
 
@@ -302,6 +312,8 @@ export const createWorkflowStore = (
     parentStepKey?: string | null
     definitionName: string
     definitionVersion: number
+    taskQueue: string
+    priority: number
     input: JsonObject
     currentStepKey: string
     idempotencyKey?: string | null
@@ -318,8 +330,11 @@ export const createWorkflowStore = (
                 id,
                 parent_run_id AS "parentRunId",
                 parent_step_key AS "parentStepKey",
+                continued_from_run_id AS "continuedFromRunId",
                 definition_name AS "definitionName",
                 definition_version AS "definitionVersion",
+                task_queue AS "taskQueue",
+                priority,
                 status,
                 current_step_key AS "currentStepKey",
                 input,
@@ -344,6 +359,8 @@ export const createWorkflowStore = (
                 parent_step_key,
                 definition_name,
                 definition_version,
+                task_queue,
+                priority,
                 status,
                 current_step_key,
                 idempotency_key,
@@ -355,10 +372,12 @@ export const createWorkflowStore = (
                 $4,
                 $1,
                 $5,
-                'queued'::workflow_run_status,
                 $6,
-                $2,
                 $7,
+                'queued'::workflow_run_status,
+                $8,
+                $2,
+                $9,
                 '{}'::jsonb
               WHERE NOT EXISTS (SELECT 1 FROM existing_run)
               ON CONFLICT (definition_name, idempotency_key) DO NOTHING
@@ -366,8 +385,11 @@ export const createWorkflowStore = (
                 id,
                 parent_run_id AS "parentRunId",
                 parent_step_key AS "parentStepKey",
+                continued_from_run_id AS "continuedFromRunId",
                 definition_name AS "definitionName",
                 definition_version AS "definitionVersion",
+                task_queue AS "taskQueue",
+                priority,
                 status,
                 current_step_key AS "currentStepKey",
                 input,
@@ -395,6 +417,8 @@ export const createWorkflowStore = (
             args.parentRunId ?? null,
             args.parentStepKey ?? null,
             args.definitionVersion,
+            args.taskQueue,
+            args.priority,
             args.currentStepKey,
             args.input,
           ]
@@ -428,8 +452,11 @@ export const createWorkflowStore = (
               id,
               parent_run_id AS "parentRunId",
               parent_step_key AS "parentStepKey",
+              continued_from_run_id AS "continuedFromRunId",
               definition_name AS "definitionName",
               definition_version AS "definitionVersion",
+              task_queue AS "taskQueue",
+              priority,
               status,
               current_step_key AS "currentStepKey",
               input,
@@ -498,6 +525,7 @@ export const createWorkflowStore = (
   const claimNextRunnableRun = async (args: {
     workerId: string
     leaseMs: number
+    taskQueues: string[]
   }) =>
     withTransaction(db, async (client) => {
       const [row] = await claimNextRunnableRunQuery.run(args, client)
@@ -604,6 +632,188 @@ export const createWorkflowStore = (
     await wakeParentForChild(run)
     return run
   }
+
+  const continueAsNew = async (args: {
+    runId: string
+    stepKey: string
+    workerId: string
+    attemptId: string
+    context: JsonObject
+    currentStepKey: string
+    input: JsonObject
+    taskQueue: string
+    priority: number
+  }) =>
+    withTransaction(db, async (client) => {
+      const [completedRow] = await queryRows<IRunRow>(
+        client,
+        `
+          UPDATE workflow_runs
+          SET
+            status = 'completed',
+            current_step_key = NULL,
+            context = $4,
+            result = NULL,
+            error = NULL,
+            lease_owner = NULL,
+            lease_expires_at = NULL,
+            available_at = now(),
+            updated_at = now(),
+            completed_at = now()
+          WHERE id = $1
+            AND current_step_key = $2
+            AND lease_owner = $3
+            AND lease_expires_at >= now()
+          RETURNING
+            id,
+            parent_run_id AS "parentRunId",
+            parent_step_key AS "parentStepKey",
+            continued_from_run_id AS "continuedFromRunId",
+            definition_name AS "definitionName",
+            definition_version AS "definitionVersion",
+            task_queue AS "taskQueue",
+            priority,
+            status,
+            current_step_key AS "currentStepKey",
+            input,
+            context,
+            result,
+            error,
+            lease_owner AS "leaseOwner",
+            lease_expires_at AS "leaseExpiresAt",
+            cancel_requested_at AS "cancelRequestedAt",
+            cancel_mode AS "cancelMode",
+            available_at AS "availableAt",
+            created_at AS "createdAt",
+            updated_at AS "updatedAt",
+            completed_at AS "completedAt"
+        `,
+        [args.runId, args.stepKey, args.workerId, args.context]
+      )
+
+      if (!completedRow) {
+        throw new LostLeaseError("Failed to continue run under active lease")
+      }
+
+      const completedRun = mapRun(completedRow)
+
+      const [nextRunRow] = await queryRows<IRunRow>(
+        client,
+        `
+          INSERT INTO workflow_runs (
+            continued_from_run_id,
+            definition_name,
+            definition_version,
+            task_queue,
+            priority,
+            status,
+            current_step_key,
+            input,
+            context
+          ) VALUES (
+            $1,
+            $2,
+            $3,
+            $4,
+            $5,
+            'queued',
+            $6,
+            $7,
+            '{}'::jsonb
+          )
+          RETURNING
+            id,
+            parent_run_id AS "parentRunId",
+            parent_step_key AS "parentStepKey",
+            continued_from_run_id AS "continuedFromRunId",
+            definition_name AS "definitionName",
+            definition_version AS "definitionVersion",
+            task_queue AS "taskQueue",
+            priority,
+            status,
+            current_step_key AS "currentStepKey",
+            input,
+            context,
+            result,
+            error,
+            lease_owner AS "leaseOwner",
+            lease_expires_at AS "leaseExpiresAt",
+            cancel_requested_at AS "cancelRequestedAt",
+            cancel_mode AS "cancelMode",
+            available_at AS "availableAt",
+            created_at AS "createdAt",
+            updated_at AS "updatedAt",
+            completed_at AS "completedAt"
+        `,
+        [
+          completedRun.id,
+          completedRun.definitionName,
+          completedRun.definitionVersion,
+          args.taskQueue,
+          args.priority,
+          args.currentStepKey,
+          args.input,
+        ]
+      )
+
+      const nextRun = mapRun(requireRow(nextRunRow, "Failed to insert continued run"))
+
+      await queryRows(
+        client,
+        `
+          UPDATE workflow_runs
+          SET
+            result = jsonb_build_object('continuedRunId', $2),
+            updated_at = now()
+          WHERE id = $1
+        `,
+        [completedRun.id, nextRun.id]
+      )
+
+      await queryRows(
+        client,
+        `
+          UPDATE workflow_step_attempts
+          SET
+            status = 'completed',
+            output = jsonb_build_object('continuedRunId', $2),
+            error = NULL,
+            completed_at = now(),
+            updated_at = now()
+          WHERE id = $1
+        `,
+        [args.attemptId, nextRun.id]
+      )
+
+      await insertEventQuery.run(
+        {
+          runId: completedRun.id,
+          stepKey: args.stepKey,
+          eventType: "run.continued_as_new",
+          payload: {
+            continuedRunId: nextRun.id,
+          },
+        },
+        client
+      )
+
+      await insertEventQuery.run(
+        {
+          runId: nextRun.id,
+          stepKey: nextRun.currentStepKey,
+          eventType: "run.started",
+          payload: {
+            continuedFromRunId: completedRun.id,
+          },
+        },
+        client
+      )
+
+      await notifyRunnable()
+      await notifyRunEvent(completedRun.id)
+      await notifyRunEvent(nextRun.id)
+      return nextRun
+    })
 
   const advanceTaskStep = async (args: {
     runId: string
@@ -964,6 +1174,7 @@ export const createWorkflowStore = (
           id,
           parent_run_id AS "parentRunId",
           parent_step_key AS "parentStepKey",
+          continued_from_run_id AS "continuedFromRunId",
           definition_name AS "definitionName",
           definition_version AS "definitionVersion",
           status,
@@ -1007,6 +1218,7 @@ export const createWorkflowStore = (
           id,
           parent_run_id AS "parentRunId",
           parent_step_key AS "parentStepKey",
+          continued_from_run_id AS "continuedFromRunId",
           definition_name AS "definitionName",
           definition_version AS "definitionVersion",
           status,
@@ -1127,6 +1339,7 @@ export const createWorkflowStore = (
             id,
             parent_run_id AS "parentRunId",
             parent_step_key AS "parentStepKey",
+            continued_from_run_id AS "continuedFromRunId",
             definition_name AS "definitionName",
             definition_version AS "definitionVersion",
             status,
@@ -1202,6 +1415,7 @@ export const createWorkflowStore = (
             id,
             parent_run_id AS "parentRunId",
             parent_step_key AS "parentStepKey",
+            continued_from_run_id AS "continuedFromRunId",
             definition_name AS "definitionName",
             definition_version AS "definitionVersion",
             status,
@@ -1373,6 +1587,8 @@ export const createWorkflowStore = (
     workflowName: string
     cronExpression: string
     payload?: JsonObject
+    taskQueue: string
+    priority: number
     nextFireAt: Date
   }) => {
     const rows = await queryRows<{
@@ -1380,6 +1596,8 @@ export const createWorkflowStore = (
       workflowName: string
       cronExpression: string
       payload: JsonValue
+      taskQueue: string
+      priority: number
       active: boolean
       nextFireAt: Date
       createdAt: Date
@@ -1391,24 +1609,37 @@ export const createWorkflowStore = (
           workflow_name,
           cron_expression,
           payload,
+          task_queue,
+          priority,
           next_fire_at
         ) VALUES (
           $1,
           $2,
           $3,
-          $4
+          $4,
+          $5,
+          $6
         )
         RETURNING
           id,
           workflow_name AS "workflowName",
           cron_expression AS "cronExpression",
           payload,
+          task_queue AS "taskQueue",
+          priority,
           active,
           next_fire_at AS "nextFireAt",
           created_at AS "createdAt",
           updated_at AS "updatedAt"
       `,
-      [args.workflowName, args.cronExpression, args.payload ?? {}, args.nextFireAt]
+      [
+        args.workflowName,
+        args.cronExpression,
+        args.payload ?? {},
+        args.taskQueue,
+        args.priority,
+        args.nextFireAt,
+      ]
     )
 
     return mapSchedule(requireRow(rows[0], "Failed to create schedule"))
@@ -1420,6 +1651,8 @@ export const createWorkflowStore = (
       workflowName: string
       cronExpression: string
       payload: JsonValue
+      taskQueue: string
+      priority: number
       active: boolean
       nextFireAt: Date
       createdAt: Date
@@ -1432,6 +1665,8 @@ export const createWorkflowStore = (
           workflow_name AS "workflowName",
           cron_expression AS "cronExpression",
           payload,
+          task_queue AS "taskQueue",
+          priority,
           active,
           next_fire_at AS "nextFireAt",
           created_at AS "createdAt",
@@ -1457,6 +1692,8 @@ export const createWorkflowStore = (
         workflowName: string
         cronExpression: string
         payload: JsonValue
+        taskQueue: string
+        priority: number
         active: boolean
         nextFireAt: Date
         createdAt: Date
@@ -1469,6 +1706,8 @@ export const createWorkflowStore = (
             workflow_name AS "workflowName",
             cron_expression AS "cronExpression",
             payload,
+            task_queue AS "taskQueue",
+            priority,
             active,
             next_fire_at AS "nextFireAt",
             created_at AS "createdAt",
@@ -1532,6 +1771,7 @@ export const createWorkflowStore = (
             id,
             parent_run_id AS "parentRunId",
             parent_step_key AS "parentStepKey",
+            continued_from_run_id AS "continuedFromRunId",
             definition_name AS "definitionName",
             definition_version AS "definitionVersion",
             status,
@@ -1656,6 +1896,7 @@ export const createWorkflowStore = (
                 id,
                 parent_run_id AS "parentRunId",
                 parent_step_key AS "parentStepKey",
+                continued_from_run_id AS "continuedFromRunId",
                 definition_name AS "definitionName",
                 definition_version AS "definitionVersion",
                 status,
@@ -1750,6 +1991,7 @@ export const createWorkflowStore = (
                   id,
                   parent_run_id AS "parentRunId",
                   parent_step_key AS "parentStepKey",
+                  continued_from_run_id AS "continuedFromRunId",
                   definition_name AS "definitionName",
                   definition_version AS "definitionVersion",
                   status,
@@ -1825,6 +2067,7 @@ export const createWorkflowStore = (
                 id,
                 parent_run_id AS "parentRunId",
                 parent_step_key AS "parentStepKey",
+                continued_from_run_id AS "continuedFromRunId",
                 definition_name AS "definitionName",
                 definition_version AS "definitionVersion",
                 status,
@@ -1947,6 +2190,7 @@ export const createWorkflowStore = (
     claimOutboxMessages,
     completeStepAttempt,
     completeRun,
+    continueAsNew,
     countOpenWaits,
     createSchedule,
     createSignal,

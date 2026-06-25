@@ -19,8 +19,11 @@ describe("scheduler", () => {
       id: "run-1",
       parentRunId: null,
       parentStepKey: null,
+      continuedFromRunId: null,
       definitionName: "demo",
       definitionVersion: 1,
+      taskQueue: "priority-email",
+      priority: 5,
       status: "queued" as const,
       currentStepKey: "start",
       input: {},
@@ -65,6 +68,8 @@ describe("scheduler", () => {
             workflowName: "demo",
             cronExpression: "* * * * *",
             payload: { ok: true },
+            taskQueue: "priority-email",
+            priority: 5,
             active: true,
             nextFireAt: new Date(),
             createdAt: new Date(),
@@ -87,6 +92,8 @@ describe("scheduler", () => {
     expect(startRun).toHaveBeenCalledWith({
       workflowName: "demo",
       payload: { ok: true },
+      taskQueue: "priority-email",
+      priority: 5,
     })
   })
 })

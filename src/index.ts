@@ -15,6 +15,12 @@ import { createWorkflowEngine } from "./lib/workflow-engine.js"
 import { createWorkflowStore } from "./lib/workflow-store.js"
 import { workflows } from "./workflows/index.js"
 
+const parseTaskQueues = (value: string) =>
+  value
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+
 const main = async () => {
   const config = getConfig()
   const sql = createDatabase(config)
@@ -47,6 +53,7 @@ const main = async () => {
   const stopWorker = startWorkerLoop({
     engine,
     workerId: config.HIPPO_WORKER_ID,
+    taskQueues: parseTaskQueues(config.HIPPO_TASK_QUEUES),
     pollIntervalMs: config.HIPPO_POLL_INTERVAL_MS,
     leaseMs: config.HIPPO_LEASE_MS,
     listenForWakeups: (onWake) => notifier.listen(() => onWake()),

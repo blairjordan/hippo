@@ -33,8 +33,11 @@ CREATE TABLE workflow_runs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   parent_run_id UUID REFERENCES workflow_runs (id) ON DELETE CASCADE,
   parent_step_key TEXT,
+  continued_from_run_id UUID REFERENCES workflow_runs (id) ON DELETE SET NULL,
   definition_name TEXT NOT NULL,
   definition_version INTEGER NOT NULL,
+  task_queue TEXT NOT NULL DEFAULT 'default',
+  priority INTEGER NOT NULL DEFAULT 0,
   status workflow_run_status NOT NULL,
   current_step_key TEXT,
   input JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -60,8 +63,14 @@ CREATE INDEX workflow_runs_lease_expires_at_idx
 CREATE INDEX workflow_runs_available_at_idx
   ON workflow_runs (available_at);
 
+CREATE INDEX workflow_runs_task_queue_priority_available_at_idx
+  ON workflow_runs (task_queue, priority DESC, available_at, created_at);
+
 CREATE INDEX workflow_runs_parent_run_id_idx
   ON workflow_runs (parent_run_id);
+
+CREATE INDEX workflow_runs_continued_from_run_id_idx
+  ON workflow_runs (continued_from_run_id);
 
 CREATE TABLE workflow_step_attempts (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -120,6 +129,8 @@ CREATE TABLE workflow_schedules (
   workflow_name TEXT NOT NULL,
   cron_expression TEXT NOT NULL,
   payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+  task_queue TEXT NOT NULL DEFAULT 'default',
+  priority INTEGER NOT NULL DEFAULT 0,
   active BOOLEAN NOT NULL DEFAULT TRUE,
   next_fire_at TIMESTAMPTZ NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),

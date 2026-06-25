@@ -3,6 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "exports": {
+    "./core": "./dist/src/core.js",
+    "./sdk": "./dist/src/sdk.js",
+    "./server": "./dist/src/server.js"
+  },
   "bin": {
     "hippo": "./bin/hippo.js"
   },
@@ -23,7 +28,8 @@
     "db:migrate": "dbmate up",
     "db:new": "dbmate new",
     "pgtyped": "npx pgtyped -c pgtyped-config.json",
-    "render:demo": "tsx scripts/render-demo.ts"
+    "render:demo": "tsx scripts/render-demo.ts",
+    "test:public-api": "npm run build && node scripts/verify-public-api.mjs"
   },
   "dependencies": {
     "@fastify/sensible": "6.0.3",

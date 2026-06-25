@@ -26,10 +26,13 @@ const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   ])
 )
 
-const startRunBodySchema: z.ZodType<JsonObject> = z.record(
-  z.string(),
-  jsonValueSchema
-)
+const jsonObjectSchema: z.ZodType<JsonObject> = z.record(z.string(), jsonValueSchema)
+
+const startRunBodySchema = z.object({
+  payload: jsonObjectSchema.default({}),
+  taskQueue: z.string().min(1).default("default"),
+  priority: z.coerce.number().int().default(0),
+})
 
 const resumeBodySchema = z.object({
   payload: jsonValueSchema.optional(),
@@ -77,7 +80,9 @@ const cancelRunBodySchema = z.object({
 const createScheduleBodySchema = z.object({
   workflowName: z.string().min(1),
   cronExpression: z.string().min(1),
-  payload: startRunBodySchema.optional(),
+  payload: jsonObjectSchema.default({}),
+  taskQueue: z.string().min(1).default("default"),
+  priority: z.coerce.number().int().default(0),
 })
 
 const reconcileBodySchema = z.object({
@@ -1170,7 +1175,10 @@ export const createWorkflowRoutes = (args: {
       args.store.getRunEvents(run.id),
       args.store.getRunAttempts(run.id),
     ])
-    const workflow = args.engine.getWorkflow(run.definitionName)
+    const workflow = args.engine.getWorkflow(
+      run.definitionName,
+      run.definitionVersion
+    )
     const document = renderRunDetailDocument({
       attempts:
         attempts.length > 0
@@ -1197,7 +1205,7 @@ export const createWorkflowRoutes = (args: {
     requireApiAuth(app, request, args.auth)
 
     const params = workflowNameParamsSchema.parse(request.params)
-    const payload = startRunBodySchema.parse(request.body ?? {})
+    const body = startRunBodySchema.parse(request.body ?? {})
     const idempotencyKey = getIdempotencyKey(request)
 
     if (!args.engine.hasWorkflow(params.workflowName)) {
@@ -1208,7 +1216,9 @@ export const createWorkflowRoutes = (args: {
 
     const run = await args.engine.startRun({
       workflowName: params.workflowName,
-      payload,
+      payload: body.payload,
+      taskQueue: body.taskQueue,
+      priority: body.priority,
       ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
     })
 
@@ -1217,6 +1227,8 @@ export const createWorkflowRoutes = (args: {
       runId: run.id,
       status: run.status,
       currentStepKey: run.currentStepKey,
+      taskQueue: run.taskQueue,
+      priority: run.priority,
     }
   })
 
@@ -1397,7 +1409,9 @@ export const createWorkflowRoutes = (args: {
     const schedule = await args.store.createSchedule({
       workflowName: body.workflowName,
       cronExpression: body.cronExpression,
-      payload: body.payload ?? {},
+      payload: body.payload,
+      taskQueue: body.taskQueue,
+      priority: body.priority,
       nextFireAt: computeNextScheduleFireAt({
         cronExpression: body.cronExpression,
       }),

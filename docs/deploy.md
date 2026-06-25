@@ -18,6 +18,7 @@ Use the same application code in every environment and switch behavior only with
 | `HIPPO_ENV` | `dev` | `staging` | `prod` | auth strictness and environment mode |
 | `HIPPO_HOST` | `127.0.0.1` | `0.0.0.0` | `0.0.0.0` | bind address |
 | `HIPPO_PORT` | `3000` | `3000` | `3000` | HTTP port |
+| `HIPPO_TASK_QUEUES` | `default` | `default` | `default` | comma-separated worker queue subscriptions |
 | `HIPPO_API_TOKEN` | optional | required | required | operator and API auth |
 | `HIPPO_CALLBACK_SECRET` | optional | required | required | callback verification |
 | `HIPPO_CALLBACK_TOLERANCE_SECONDS` | optional | optional | optional | callback clock skew window |

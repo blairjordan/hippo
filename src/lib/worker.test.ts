@@ -37,6 +37,7 @@ describe("worker loop", () => {
     const stop = startWorkerLoop({
       engine,
       workerId: "worker-1",
+      taskQueues: ["default"],
       pollIntervalMs: 10,
       leaseMs: 5_000,
     })
@@ -78,6 +79,7 @@ describe("worker loop", () => {
     const stop = startWorkerLoop({
       engine,
       workerId: "worker-1",
+      taskQueues: ["default"],
       pollIntervalMs: 10_000,
       leaseMs: 5_000,
       listenForWakeups: async (listener) => {

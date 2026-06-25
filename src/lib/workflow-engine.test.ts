@@ -233,6 +233,72 @@ const createStoreStub = () => {
       wakeParentForChildRun(next)
       return next
     },
+    async continueAsNew(args: {
+      runId: string
+      stepKey: string
+      attemptId: string
+      context: JsonObject
+      currentStepKey: string
+      input: JsonObject
+      taskQueue: string
+      priority: number
+    }) {
+      const run = runs.get(args.runId)!
+      const nextRun: WorkflowRunRecord = {
+        id: `run-${++runCounter}`,
+        parentRunId: null,
+        parentStepKey: null,
+        continuedFromRunId: run.id,
+        definitionName: run.definitionName,
+        definitionVersion: run.definitionVersion,
+        taskQueue: args.taskQueue,
+        priority: args.priority,
+        status: "queued",
+        currentStepKey: args.currentStepKey,
+        input: args.input,
+        context: {},
+        result: null,
+        error: null,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        cancelRequestedAt: null,
+        cancelMode: null,
+        availableAt: now(),
+        createdAt: now(),
+        updatedAt: now(),
+        completedAt: null,
+      }
+      const completedRun: WorkflowRunRecord = {
+        ...run,
+        currentStepKey: null,
+        context: args.context,
+        result: { continuedRunId: nextRun.id },
+        status: "completed",
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        completedAt: now(),
+        updatedAt: now(),
+      }
+      const attempt = attempts.find((candidate) => candidate.id === args.attemptId)!
+      attempt.status = "completed"
+      attempt.output = { continuedRunId: nextRun.id }
+      attempt.completedAt = now()
+      runs.set(run.id, completedRun)
+      runs.set(nextRun.id, nextRun)
+      appendEvent({
+        runId: run.id,
+        stepKey: args.stepKey,
+        eventType: "run.continued_as_new",
+        payload: { continuedRunId: nextRun.id },
+      })
+      appendEvent({
+        runId: nextRun.id,
+        stepKey: nextRun.currentStepKey,
+        eventType: "run.started",
+        payload: { continuedFromRunId: run.id },
+      })
+      return nextRun
+    },
     async completeStepAttempt(args: {
       attemptId: string
       output: JsonValue | null
@@ -702,6 +768,8 @@ const createStoreStub = () => {
       parentStepKey?: string | null
       definitionName: string
       definitionVersion: number
+      taskQueue: string
+      priority: number
       input: JsonObject
       currentStepKey: string
     }) {
@@ -709,8 +777,11 @@ const createStoreStub = () => {
         id: `run-${++runCounter}`,
         parentRunId: args.parentRunId ?? null,
         parentStepKey: args.parentStepKey ?? null,
+        continuedFromRunId: null,
         definitionName: args.definitionName,
         definitionVersion: args.definitionVersion,
+        taskQueue: args.taskQueue,
+        priority: args.priority,
         status: "queued",
         currentStepKey: args.currentStepKey,
         input: args.input,
@@ -782,6 +853,56 @@ describe("workflow engine", () => {
     const completed = await store.getRun(run.id)
 
     expect(completed?.status).toBe("completed")
+  })
+
+  it("continues a run as new from a task step", async () => {
+    const workflow = defineWorkflow({
+      name: "continue-as-new-workflow",
+      version: 1,
+      startAt: "start",
+      steps: {
+        start: taskStep({
+          kind: "task",
+          next: "done",
+          run: () => ({
+            continueAsNew: {
+              payload: { cursor: 2 },
+              taskQueue: "bulk",
+              priority: 9,
+            },
+          }),
+        }),
+        done: endStep(),
+      },
+    })
+    const store = createStoreStub()
+    const engine = createWorkflowEngine({
+      definitions: [workflow],
+      metrics: createMetrics(),
+      store,
+    })
+
+    const originalRun = await engine.startRun({
+      workflowName: workflow.name,
+      payload: { cursor: 1 },
+      taskQueue: "default",
+      priority: 1,
+    })
+    const continuedRun = await engine.tick("test-worker", 5_000, [
+      "default",
+      "bulk",
+    ])
+
+    expect(continuedRun?.continuedFromRunId).toBe(originalRun.id)
+    expect(continuedRun?.taskQueue).toBe("bulk")
+    expect(continuedRun?.priority).toBe(9)
+    expect(continuedRun?.input).toEqual({ cursor: 2 })
+
+    const completedOriginal = await store.getRun(originalRun.id)
+    expect(completedOriginal?.status).toBe("completed")
+    expect(completedOriginal?.result).toEqual({
+      continuedRunId: continuedRun?.id,
+    })
   })
 
   it("resumes a wait exactly once in the store contract", async () => {

@@ -3,6 +3,7 @@ import type { WorkflowEngine } from "./workflow-engine.js"
 export const startWorkerLoop = (args: {
   engine: WorkflowEngine
   workerId: string
+  taskQueues: string[]
   pollIntervalMs: number
   leaseMs: number
   listenForWakeups?: (onWake: () => void) => Promise<() => Promise<void>>
@@ -48,7 +49,7 @@ export const startWorkerLoop = (args: {
     inFlight = true
     inFlightPromise = (async () => {
       try {
-        await args.engine.tick(args.workerId, args.leaseMs)
+        await args.engine.tick(args.workerId, args.leaseMs, args.taskQueues)
       } catch (error) {
         args.onError?.(error)
       } finally {

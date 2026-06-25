@@ -29,27 +29,67 @@ const sleep = (delayMs: number) =>
     setTimeout(resolve, delayMs)
   })
 
-const getDefinition = (
-  definitions: Map<string, WorkflowDefinition>,
-  name: string
-) => {
-  const definition = definitions.get(name)
+type DefinitionRegistry = {
+  byVersion: Map<string, WorkflowDefinition>
+  latestByName: Map<string, WorkflowDefinition>
+}
 
-  if (!definition) {
-    return null
+const getDefinitionVersionKey = (name: string, version: number) =>
+  `${name}@${String(version)}`
+
+const createDefinitionRegistry = (definitions: WorkflowDefinition[]): DefinitionRegistry => {
+  const byVersion = new Map<string, WorkflowDefinition>()
+  const latestByName = new Map<string, WorkflowDefinition>()
+
+  for (const definition of definitions) {
+    const versionKey = getDefinitionVersionKey(definition.name, definition.version)
+
+    if (byVersion.has(versionKey)) {
+      throw new Error(
+        `Duplicate workflow definition registered for "${definition.name}" version ${String(definition.version)}`
+      )
+    }
+
+    byVersion.set(versionKey, definition)
+
+    const latest = latestByName.get(definition.name)
+
+    if (!latest || definition.version > latest.version) {
+      latestByName.set(definition.name, definition)
+    }
   }
 
-  return definition
+  return {
+    byVersion,
+    latestByName,
+  }
+}
+
+const getDefinition = (
+  registry: DefinitionRegistry,
+  name: string,
+  version?: number
+) => {
+  if (version !== undefined) {
+    return registry.byVersion.get(getDefinitionVersionKey(name, version)) ?? null
+  }
+
+  return registry.latestByName.get(name) ?? null
 }
 
 const requireDefinition = (
-  definitions: Map<string, WorkflowDefinition>,
-  name: string
+  registry: DefinitionRegistry,
+  name: string,
+  version?: number
 ) => {
-  const definition = getDefinition(definitions, name)
+  const definition = getDefinition(registry, name, version)
 
   if (!definition) {
-    throw new Error(`Workflow definition "${name}" is not registered`)
+    throw new Error(
+      version === undefined
+        ? `Workflow definition "${name}" is not registered`
+        : `Workflow definition "${name}" version ${String(version)} is not registered`
+    )
   }
 
   return definition
@@ -283,14 +323,18 @@ const withTimeout = async <T>(
 }
 
 const continueRun = async (args: {
-  definitions: Map<string, WorkflowDefinition>
+  definitions: DefinitionRegistry
   metrics: HippoMetrics
   store: WorkflowStore
   workerId: string
   run: WorkflowRunRecord
 }) => {
   let activeRun = args.run
-  const definition = requireDefinition(args.definitions, activeRun.definitionName)
+  const definition = requireDefinition(
+    args.definitions,
+    activeRun.definitionName,
+    activeRun.definitionVersion
+  )
 
   while (activeRun.currentStepKey) {
     const stepKey = activeRun.currentStepKey
@@ -582,6 +626,8 @@ const continueRun = async (args: {
             definitionName: step.workflow,
             definitionVersion: requireDefinition(args.definitions, step.workflow)
               .version,
+            taskQueue: activeRun.taskQueue,
+            priority: activeRun.priority,
             input: childInput,
             currentStepKey: requireDefinition(args.definitions, step.workflow)
               .startAt,
@@ -683,6 +729,34 @@ const continueRun = async (args: {
         step.timeoutMs,
         `Task step "${stepKey}" in workflow "${definition.name}"`
       )
+
+      if (result.continueAsNew) {
+        const nextRun = await args.store.continueAsNew({
+          runId: activeRun.id,
+          stepKey,
+          workerId: args.workerId,
+          attemptId: attempt.id,
+          context: mergeContext(activeRun.context, result.patch),
+          currentStepKey: definition.startAt,
+          input: result.continueAsNew.payload,
+          taskQueue: result.continueAsNew.taskQueue ?? activeRun.taskQueue,
+          priority: result.continueAsNew.priority ?? activeRun.priority,
+        })
+
+        args.metrics.runsStarted.inc({ workflow: definition.name })
+        observeRunDuration({
+          metrics: args.metrics,
+          run: activeRun,
+          status: "completed",
+        })
+        args.metrics.stepAttempts.inc({
+          workflow: definition.name,
+          step: stepKey,
+          status: "completed",
+        })
+        return nextRun
+      }
+
       const nextStepKey = resolveTaskTransition(result, step.next)
 
       if (!nextStepKey) {
@@ -777,7 +851,7 @@ const continueRun = async (args: {
 }
 
 const compensateRun = async (args: {
-  definitions: Map<string, WorkflowDefinition>
+  definitions: DefinitionRegistry
   metrics: HippoMetrics
   store: WorkflowStore
   run: WorkflowRunRecord
@@ -786,7 +860,11 @@ const compensateRun = async (args: {
     return args.run
   }
 
-  const definition = requireDefinition(args.definitions, args.run.definitionName)
+  const definition = requireDefinition(
+    args.definitions,
+    args.run.definitionName,
+    args.run.definitionVersion
+  )
   const attempts = await args.store.getRunAttempts(args.run.id)
   const compensatedStepKeys = new Set(
     attempts
@@ -928,20 +1006,22 @@ export const createWorkflowEngine = (args: {
   metrics: HippoMetrics
   store: WorkflowStore
 }) => {
-  const definitions = new Map(
-    args.definitions.map((definition) => [definition.name, definition])
-  )
+  const definitions = createDefinitionRegistry(args.definitions)
 
   const startRun = async (input: {
     workflowName: string
     payload: JsonObject
     idempotencyKey?: string
+    taskQueue?: string
+    priority?: number
   }) => {
     const definition = requireDefinition(definitions, input.workflowName)
 
     const run = await args.store.startRun({
       definitionName: definition.name,
       definitionVersion: definition.version,
+      taskQueue: input.taskQueue ?? "default",
+      priority: input.priority ?? 0,
       input: input.payload,
       currentStepKey: definition.startAt,
       ...(input.idempotencyKey === undefined
@@ -953,8 +1033,16 @@ export const createWorkflowEngine = (args: {
     return run
   }
 
-  const tick = async (workerId: string, leaseMs: number) => {
-    const claimedRun = await args.store.claimNextRunnableRun({ workerId, leaseMs })
+  const tick = async (
+    workerId: string,
+    leaseMs: number,
+    taskQueues = ["default"]
+  ) => {
+    const claimedRun = await args.store.claimNextRunnableRun({
+      workerId,
+      leaseMs,
+      taskQueues,
+    })
 
     if (!claimedRun) {
       return null
@@ -994,7 +1082,11 @@ export const createWorkflowEngine = (args: {
         correlationKey: input.correlationKey,
         payload: input.payload,
         resume: async (run, wait) => {
-          const definition = requireDefinition(definitions, run.definitionName)
+          const definition = requireDefinition(
+            definitions,
+            run.definitionName,
+            run.definitionVersion
+          )
           const step = getStep(definition, wait.stepKey)
 
           if (step.kind !== "wait") {
@@ -1049,10 +1141,11 @@ export const createWorkflowEngine = (args: {
     }
 
   return {
-    getWorkflow: (workflowName: string) =>
-      requireDefinition(definitions, workflowName),
-    hasWorkflow: (workflowName: string) => getDefinition(definitions, workflowName) !== null,
-    listWorkflows: () => [...definitions.values()],
+    getWorkflow: (workflowName: string, version?: number) =>
+      requireDefinition(definitions, workflowName, version),
+    hasWorkflow: (workflowName: string, version?: number) =>
+      getDefinition(definitions, workflowName, version) !== null,
+    listWorkflows: () => [...definitions.latestByName.values()],
     resumeWait,
     runCompensation,
     startRun,

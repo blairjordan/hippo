@@ -19,8 +19,11 @@ export type WorkflowRunRecord = {
   id: string
   parentRunId: string | null
   parentStepKey: string | null
+  continuedFromRunId: string | null
   definitionName: string
   definitionVersion: number
+  taskQueue: string
+  priority: number
   status: WorkflowRunStatus
   currentStepKey: string | null
   input: JsonObject
@@ -91,6 +94,11 @@ export type TaskStepResult = {
   patch?: JsonObject
   transition?: string
   output?: JsonValue
+  continueAsNew?: {
+    payload: JsonObject
+    taskQueue?: string
+    priority?: number
+  }
 }
 
 export type WaitStepOpenResult = {
@@ -119,6 +127,8 @@ export type WorkflowScheduleRecord = {
   workflowName: string
   cronExpression: string
   payload: JsonObject
+  taskQueue: string
+  priority: number
   active: boolean
   nextFireAt: Date
   createdAt: Date
