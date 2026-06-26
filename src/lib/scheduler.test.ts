@@ -21,6 +21,7 @@ describe("scheduler", () => {
       parentStepKey: null,
       continuedFromRunId: null,
       branchedFromRunId: null,
+      branchedFromAttemptRunId: null,
       branchedFromAttemptId: null,
       supersededByRunId: null,
       definitionName: "demo",

@@ -21,6 +21,7 @@ export type WorkflowRunRecord = {
   parentStepKey: string | null
   continuedFromRunId: string | null
   branchedFromRunId: string | null
+  branchedFromAttemptRunId: string | null
   branchedFromAttemptId: string | null
   supersededByRunId: string | null
   definitionName: string

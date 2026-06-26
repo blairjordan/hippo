@@ -1,0 +1,26 @@
+{
+  "name": "@hippo/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Hippo Fastify app, worker loop, recovery loop, and server bootstrap helpers",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@fastify/sensible": "6.0.3",
+    "fastify": "5.6.0",
+    "cron-parser": "^5.6.0",
+    "zod": "4.1.5"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/src/server.d.ts",
+      "default": "./dist/src/server.js"
+    }
+  }
+}

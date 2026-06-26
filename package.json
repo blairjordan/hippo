@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
   "exports": {
     "./core": "./dist/src/core.js",
     "./sdk": "./dist/src/sdk.js",
@@ -20,10 +23,12 @@
     "hippo:dev": "tsx scripts/hippo-dev.ts",
     "hippo:init": "node ./bin/hippo.js init",
     "start": "node dist/index.js",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/sync-workspace-packages.mjs",
+    "build:packages": "node scripts/sync-workspace-packages.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint .",
     "test": "vitest run",
+    "test:pg": "vitest run src/lib/workflow-store.pg.test.ts",
     "test:watch": "vitest",
     "db:migrate": "dbmate up",
     "db:new": "dbmate new",

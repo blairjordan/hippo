@@ -12,8 +12,10 @@ Hippo is built for teams that want durable workflow orchestration without adding
 - Same-transaction step commit lets workflow progress and application writes commit together, which is the practical moat for payment, fulfillment, and callback-heavy systems.
 - Local, staging, and prod environments share one runtime shape and one env model instead of requiring a second operational system to learn.
 - The built-in dashboard and SSE event streams make workflow state visible without standing up a separate frontend.
+- Operator queries now support filtered run listing plus lineage inspection for rewind, fork, continue-as-new, and parent-child chains.
 - TypeScript-first workflow definitions keep business logic in ordinary application code instead of pushing teams into a separate workflow DSL.
 - Version-pinned execution keeps in-flight runs on the exact workflow definition version they started with while new starts pick the latest registered version.
+- Hot audit tables are hash-partitioned by `run_id`, so run-scoped history reads stay prune-friendly as attempts and events grow.
 
 ## Where It Fits
 
@@ -90,6 +92,10 @@ Terminal runs can branch from a prior step attempt using the stored pre-step con
 <h3>🛰️ OTel Tracing</h3>
 HTTP requests, worker ticks, step execution, scheduler dispatch, recovery, outbox delivery, and store mutations emit nested OpenTelemetry-compatible spans so traces stay connected through the full runtime path.
 </td>
+<td align="center">
+<h3>🗂️ Partitioned History</h3>
+`workflow_step_attempts` and `workflow_events` are hash-partitioned by `run_id`, which keeps the hot history tables friendlier to pruning and long-lived fan-out.
+</td>
 </tr>
 </table>
 
@@ -121,9 +127,11 @@ curl -X POST \
 The generated app includes:
 
 - built-in dashboard with Mermaid workflow renders and SSE event tails
+- filtered operator run listing plus lineage inspection APIs
 - durable retries with exponential backoff, jitter, and max delay cap
 - graceful cancel, hard terminate, and compensation hooks
 - public `hippo/sdk`, `hippo/core`, and `hippo/server` entrypoints for local package-style consumption
+- workspace package previews under `packages/core`, `packages/sdk`, and `packages/server`
 - local `docker compose` Postgres plus migrations and example workflow wiring
 
 Required environment:
@@ -201,6 +209,16 @@ import { createApp, startWorkerLoop } from "hippo/server"
 
 These entrypoints are verified locally through the package `exports` map today. The package is not published yet, so the source-repo workflow remains the supported install path.
 
+Workspace package previews:
+
+- `packages/core`
+- `packages/sdk`
+- `packages/server`
+
+Running `npm run build` copies the compiled package-specific entrypoint artifacts
+into those package directories so their exported entrypoints, manifests, and
+README surfaces can be smoke-tested locally.
+
 Tracing:
 
 - Hippo exposes `createHippoTracer()` and emits nested spans through the runtime.
@@ -268,6 +286,16 @@ curl -X POST \
   -d '{"fromAttemptId":"<attempt-id>"}'
 ```
 
+Filter operator runs or inspect lineage:
+
+```bash
+curl -H "Authorization: Bearer $HIPPO_API_TOKEN" \
+  "http://127.0.0.1:3000/v1/operators/runs?workflowName=demo-delivery&status=waiting&search=delivery&limit=25"
+
+curl -H "Authorization: Bearer $HIPPO_API_TOKEN" \
+  "http://127.0.0.1:3000/v1/operators/runs/<run-id>/lineage"
+```
+
 Render a workflow as Mermaid:
 
 ```bash
@@ -288,5 +316,5 @@ Postgres-backed integration tests:
 
 ```bash
 HIPPO_PG_TEST_URL=postgres://postgres:postgres@127.0.0.1:55432/postgres \
-  npm run test -- src/lib/workflow-store.pg.test.ts
+  npm run test:pg
 ```

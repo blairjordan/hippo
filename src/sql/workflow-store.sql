@@ -33,6 +33,7 @@ RETURNING
   parent_step_key AS "parentStepKey",
   continued_from_run_id AS "continuedFromRunId",
   branched_from_run_id AS "branchedFromRunId",
+  branched_from_attempt_run_id AS "branchedFromAttemptRunId",
   branched_from_attempt_id AS "branchedFromAttemptId",
   superseded_by_run_id AS "supersededByRunId",
   definition_name AS "definitionName",
@@ -59,6 +60,7 @@ SELECT
   parent_step_key AS "parentStepKey",
   continued_from_run_id AS "continuedFromRunId",
   branched_from_run_id AS "branchedFromRunId",
+  branched_from_attempt_run_id AS "branchedFromAttemptRunId",
   branched_from_attempt_id AS "branchedFromAttemptId",
   superseded_by_run_id AS "supersededByRunId",
   definition_name AS "definitionName",
@@ -159,6 +161,13 @@ FROM candidate
 WHERE runs.id = candidate.id
 RETURNING
   runs.id,
+  runs.parent_run_id AS "parentRunId",
+  runs.parent_step_key AS "parentStepKey",
+  runs.continued_from_run_id AS "continuedFromRunId",
+  runs.branched_from_run_id AS "branchedFromRunId",
+  runs.branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+  runs.branched_from_attempt_id AS "branchedFromAttemptId",
+  runs.superseded_by_run_id AS "supersededByRunId",
   runs.definition_name AS "definitionName",
   runs.definition_version AS "definitionVersion",
   runs.task_queue AS "taskQueue",
@@ -251,6 +260,7 @@ WHERE run_id = :runId
 /* @name InsertBranchedRun */
 INSERT INTO workflow_runs (
   branched_from_run_id,
+  branched_from_attempt_run_id,
   branched_from_attempt_id,
   definition_name,
   definition_version,
@@ -262,6 +272,7 @@ INSERT INTO workflow_runs (
   context
 ) VALUES (
   :branchedFromRunId,
+  :branchedFromAttemptRunId,
   :branchedFromAttemptId,
   :definitionName,
   :definitionVersion,
@@ -278,6 +289,7 @@ RETURNING
   parent_step_key AS "parentStepKey",
   continued_from_run_id AS "continuedFromRunId",
   branched_from_run_id AS "branchedFromRunId",
+  branched_from_attempt_run_id AS "branchedFromAttemptRunId",
   branched_from_attempt_id AS "branchedFromAttemptId",
   superseded_by_run_id AS "supersededByRunId",
   definition_name AS "definitionName",
@@ -312,6 +324,7 @@ RETURNING
   parent_step_key AS "parentStepKey",
   continued_from_run_id AS "continuedFromRunId",
   branched_from_run_id AS "branchedFromRunId",
+  branched_from_attempt_run_id AS "branchedFromAttemptRunId",
   branched_from_attempt_id AS "branchedFromAttemptId",
   superseded_by_run_id AS "supersededByRunId",
   definition_name AS "definitionName",
@@ -341,7 +354,8 @@ SET
   error = NULL,
   completed_at = now(),
   updated_at = now()
-WHERE id = :attemptId
+WHERE run_id = :runId
+  AND id = :attemptId
 RETURNING
   id,
   run_id AS "runId",
@@ -366,7 +380,8 @@ SET
   error = :error,
   completed_at = now(),
   updated_at = now()
-WHERE id = :attemptId
+WHERE run_id = :runId
+  AND id = :attemptId
 RETURNING
   id,
   run_id AS "runId",
@@ -400,6 +415,10 @@ WITH updated_run AS (
     parent_run_id AS "parentRunId",
     parent_step_key AS "parentStepKey",
     continued_from_run_id AS "continuedFromRunId",
+    branched_from_run_id AS "branchedFromRunId",
+    branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+    branched_from_attempt_id AS "branchedFromAttemptId",
+    superseded_by_run_id AS "supersededByRunId",
     definition_name AS "definitionName",
     definition_version AS "definitionVersion",
     task_queue AS "taskQueue",
@@ -445,6 +464,13 @@ WITH updated_run AS (
     AND lease_expires_at >= now()
   RETURNING
     id,
+    parent_run_id AS "parentRunId",
+    parent_step_key AS "parentStepKey",
+    continued_from_run_id AS "continuedFromRunId",
+    branched_from_run_id AS "branchedFromRunId",
+    branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+    branched_from_attempt_id AS "branchedFromAttemptId",
+    superseded_by_run_id AS "supersededByRunId",
     definition_name AS "definitionName",
     definition_version AS "definitionVersion",
     task_queue AS "taskQueue",
@@ -487,6 +513,13 @@ WITH updated_run AS (
     AND lease_expires_at >= now()
   RETURNING
     id,
+    parent_run_id AS "parentRunId",
+    parent_step_key AS "parentStepKey",
+    continued_from_run_id AS "continuedFromRunId",
+    branched_from_run_id AS "branchedFromRunId",
+    branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+    branched_from_attempt_id AS "branchedFromAttemptId",
+    superseded_by_run_id AS "supersededByRunId",
     definition_name AS "definitionName",
     definition_version AS "definitionVersion",
     task_queue AS "taskQueue",
@@ -540,6 +573,13 @@ WITH updated_run AS (
     AND lease_expires_at >= now()
   RETURNING
     id,
+    parent_run_id AS "parentRunId",
+    parent_step_key AS "parentStepKey",
+    continued_from_run_id AS "continuedFromRunId",
+    branched_from_run_id AS "branchedFromRunId",
+    branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+    branched_from_attempt_id AS "branchedFromAttemptId",
+    superseded_by_run_id AS "supersededByRunId",
     definition_name AS "definitionName",
     definition_version AS "definitionVersion",
     task_queue AS "taskQueue",
@@ -603,6 +643,13 @@ WITH updated_run AS (
     AND lease_expires_at >= now()
   RETURNING
     id,
+    parent_run_id AS "parentRunId",
+    parent_step_key AS "parentStepKey",
+    continued_from_run_id AS "continuedFromRunId",
+    branched_from_run_id AS "branchedFromRunId",
+    branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+    branched_from_attempt_id AS "branchedFromAttemptId",
+    superseded_by_run_id AS "supersededByRunId",
     definition_name AS "definitionName",
     definition_version AS "definitionVersion",
     task_queue AS "taskQueue",
@@ -654,6 +701,13 @@ WITH updated_run AS (
     AND lease_expires_at >= now()
   RETURNING
     id,
+    parent_run_id AS "parentRunId",
+    parent_step_key AS "parentStepKey",
+    continued_from_run_id AS "continuedFromRunId",
+    branched_from_run_id AS "branchedFromRunId",
+    branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+    branched_from_attempt_id AS "branchedFromAttemptId",
+    superseded_by_run_id AS "supersededByRunId",
     definition_name AS "definitionName",
     definition_version AS "definitionVersion",
     task_queue AS "taskQueue",
@@ -704,6 +758,13 @@ WITH updated_run AS (
     AND lease_expires_at >= now()
   RETURNING
     id,
+    parent_run_id AS "parentRunId",
+    parent_step_key AS "parentStepKey",
+    continued_from_run_id AS "continuedFromRunId",
+    branched_from_run_id AS "branchedFromRunId",
+    branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+    branched_from_attempt_id AS "branchedFromAttemptId",
+    superseded_by_run_id AS "supersededByRunId",
     definition_name AS "definitionName",
     definition_version AS "definitionVersion",
     task_queue AS "taskQueue",
@@ -752,6 +813,7 @@ SELECT
   parent_step_key AS "parentStepKey",
   continued_from_run_id AS "continuedFromRunId",
   branched_from_run_id AS "branchedFromRunId",
+  branched_from_attempt_run_id AS "branchedFromAttemptRunId",
   branched_from_attempt_id AS "branchedFromAttemptId",
   superseded_by_run_id AS "supersededByRunId",
   definition_name AS "definitionName",
@@ -803,6 +865,13 @@ WITH updated_wait AS (
     AND EXISTS (SELECT 1 FROM updated_wait)
   RETURNING
     id,
+    parent_run_id AS "parentRunId",
+    parent_step_key AS "parentStepKey",
+    continued_from_run_id AS "continuedFromRunId",
+    branched_from_run_id AS "branchedFromRunId",
+    branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+    branched_from_attempt_id AS "branchedFromAttemptId",
+    superseded_by_run_id AS "supersededByRunId",
     definition_name AS "definitionName",
     definition_version AS "definitionVersion",
     task_queue AS "taskQueue",
@@ -945,6 +1014,148 @@ RETURNING
   created_at AS "createdAt",
   updated_at AS "updatedAt";
 
+/* @name ListRuns */
+SELECT
+  id,
+  parent_run_id AS "parentRunId",
+  parent_step_key AS "parentStepKey",
+  continued_from_run_id AS "continuedFromRunId",
+  branched_from_run_id AS "branchedFromRunId",
+  branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+  branched_from_attempt_id AS "branchedFromAttemptId",
+  superseded_by_run_id AS "supersededByRunId",
+  definition_name AS "definitionName",
+  definition_version AS "definitionVersion",
+  task_queue AS "taskQueue",
+  priority,
+  status,
+  current_step_key AS "currentStepKey",
+  input,
+  context,
+  result,
+  error,
+  lease_owner AS "leaseOwner",
+  lease_expires_at AS "leaseExpiresAt",
+  cancel_requested_at AS "cancelRequestedAt",
+  cancel_mode AS "cancelMode",
+  available_at AS "availableAt",
+  created_at AS "createdAt",
+  updated_at AS "updatedAt",
+  completed_at AS "completedAt"
+FROM workflow_runs
+WHERE (:workflowName::text IS NULL OR definition_name = :workflowName)
+  AND (:status::text IS NULL OR status::text = :status)
+  AND (:taskQueue::text IS NULL OR task_queue = :taskQueue)
+  AND (:parentRunId::uuid IS NULL OR parent_run_id = :parentRunId)
+  AND (
+    :search::text IS NULL
+    OR id::text ILIKE '%' || :search || '%'
+    OR definition_name ILIKE '%' || :search || '%'
+    OR COALESCE(current_step_key, '') ILIKE '%' || :search || '%'
+  )
+ORDER BY updated_at DESC, created_at DESC
+LIMIT :limit;
+
+/* @name ListRunLineage */
+WITH RECURSIVE lineage AS (
+  SELECT
+    workflow_runs.id,
+    workflow_runs.parent_run_id,
+    workflow_runs.parent_step_key,
+    workflow_runs.continued_from_run_id,
+    workflow_runs.branched_from_run_id,
+    workflow_runs.branched_from_attempt_run_id,
+    workflow_runs.branched_from_attempt_id,
+    workflow_runs.superseded_by_run_id,
+    workflow_runs.definition_name,
+    workflow_runs.definition_version,
+    workflow_runs.task_queue,
+    workflow_runs.priority,
+    workflow_runs.status,
+    workflow_runs.current_step_key,
+    workflow_runs.input,
+    workflow_runs.context,
+    workflow_runs.result,
+    workflow_runs.error,
+    workflow_runs.lease_owner,
+    workflow_runs.lease_expires_at,
+    workflow_runs.cancel_requested_at,
+    workflow_runs.cancel_mode,
+    workflow_runs.available_at,
+    workflow_runs.created_at,
+    workflow_runs.updated_at,
+    workflow_runs.completed_at
+  FROM workflow_runs
+  WHERE id = :runId
+
+  UNION
+
+  SELECT
+    related.id,
+    related.parent_run_id,
+    related.parent_step_key,
+    related.continued_from_run_id,
+    related.branched_from_run_id,
+    related.branched_from_attempt_run_id,
+    related.branched_from_attempt_id,
+    related.superseded_by_run_id,
+    related.definition_name,
+    related.definition_version,
+    related.task_queue,
+    related.priority,
+    related.status,
+    related.current_step_key,
+    related.input,
+    related.context,
+    related.result,
+    related.error,
+    related.lease_owner,
+    related.lease_expires_at,
+    related.cancel_requested_at,
+    related.cancel_mode,
+    related.available_at,
+    related.created_at,
+    related.updated_at,
+    related.completed_at
+  FROM workflow_runs AS related
+  JOIN lineage
+    ON related.id = lineage.continued_from_run_id
+    OR related.id = lineage.branched_from_run_id
+    OR related.id = lineage.superseded_by_run_id
+    OR related.continued_from_run_id = lineage.id
+    OR related.branched_from_run_id = lineage.id
+    OR related.superseded_by_run_id = lineage.id
+)
+SELECT
+  id,
+  parent_run_id AS "parentRunId",
+  parent_step_key AS "parentStepKey",
+  continued_from_run_id AS "continuedFromRunId",
+  branched_from_run_id AS "branchedFromRunId",
+  branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+  branched_from_attempt_id AS "branchedFromAttemptId",
+  superseded_by_run_id AS "supersededByRunId",
+  definition_name AS "definitionName",
+  definition_version AS "definitionVersion",
+  task_queue AS "taskQueue",
+  priority,
+  status,
+  current_step_key AS "currentStepKey",
+  input,
+  context,
+  result,
+  error,
+  lease_owner AS "leaseOwner",
+  lease_expires_at AS "leaseExpiresAt",
+  cancel_requested_at AS "cancelRequestedAt",
+  cancel_mode AS "cancelMode",
+  available_at AS "availableAt",
+  created_at AS "createdAt",
+  updated_at AS "updatedAt",
+  completed_at AS "completedAt"
+FROM lineage
+ORDER BY created_at ASC, updated_at ASC, id ASC;
+
 /* @name ListActiveRuns */
 SELECT
   id,
@@ -1041,6 +1252,13 @@ WITH updated_run AS (
     AND status IN ('queued', 'running', 'waiting', 'failed')
   RETURNING
     id,
+    parent_run_id AS "parentRunId",
+    parent_step_key AS "parentStepKey",
+    continued_from_run_id AS "continuedFromRunId",
+    branched_from_run_id AS "branchedFromRunId",
+    branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+    branched_from_attempt_id AS "branchedFromAttemptId",
+    superseded_by_run_id AS "supersededByRunId",
     definition_name AS "definitionName",
     definition_version AS "definitionVersion",
     task_queue AS "taskQueue",

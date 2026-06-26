@@ -26,6 +26,7 @@ const createRunRecord = (
   parentStepKey: null,
   continuedFromRunId: null,
   branchedFromRunId: null,
+  branchedFromAttemptRunId: null,
   branchedFromAttemptId: null,
   supersededByRunId: null,
   definitionName: demoWorkflow.name,
@@ -147,6 +148,12 @@ const createStoreStub = (healthy: boolean | Error = true) => ({
     return []
   },
   async listFailedRuns() {
+    return []
+  },
+  async listRunLineage(runId: string) {
+    return [createRunRecord({ id: runId })]
+  },
+  async listRuns() {
     return []
   },
   async listSchedules() {
@@ -354,6 +361,22 @@ describe("app routes", () => {
           },
         ]
       },
+      async listRunLineage() {
+        return [
+          createRunRecord({
+            id: "run-0",
+            currentStepKey: null,
+            status: "completed",
+          }),
+          createRunRecord({
+            id: "run-1",
+            branchedFromRunId: "run-0",
+            branchedFromAttemptRunId: "run-0",
+            branchedFromAttemptId: "attempt-1",
+            status: "waiting",
+          }),
+        ]
+      },
     }
     const runApp = createApp({
       auth: createAuth(),
@@ -374,6 +397,7 @@ describe("app routes", () => {
     expect(response.statusCode).toBe(200)
     expect(response.headers["content-type"]).toContain("text/html")
     expect(response.body).toContain("Live events")
+    expect(response.body).toContain("Lineage")
     expect(response.body).toContain('data-theme-toggle')
     expect(response.body).toContain('class="mermaid"')
     expect(response.body).toContain("class step_5_delivery_confirmation currentStep")
@@ -451,6 +475,109 @@ describe("app routes", () => {
     expect(authenticated.statusCode).toBe(200)
 
     await securedApp.close()
+  })
+
+  it("lists operator runs with filters", async () => {
+    let capturedQuery:
+      | {
+          limit: number
+          parentRunId?: string
+          search?: string
+          status?: WorkflowRunRecord["status"]
+          taskQueue?: string
+          workflowName?: string
+        }
+      | null = null
+    const store = {
+      ...createStoreStub(),
+      async listRuns(args: {
+        limit: number
+        parentRunId?: string
+        search?: string
+        status?: WorkflowRunRecord["status"]
+        taskQueue?: string
+        workflowName?: string
+      }) {
+        capturedQuery = args
+        return [createRunRecord({ id: "run-filtered", status: "running" })]
+      },
+    }
+    const operatorApp = createApp({
+      auth: createAuth(),
+      engine: createWorkflowEngine({
+        definitions: [demoWorkflow],
+        metrics: createMetrics(),
+        store,
+      }),
+      metrics: createMetrics(),
+      store,
+    })
+
+    const response = await operatorApp.inject({
+      method: "GET",
+      url: "/v1/operators/runs?limit=10&workflowName=demo-delivery&status=running&taskQueue=priority&search=run&parentRunId=11111111-1111-4111-8111-111111111111",
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({
+      runs: [{ id: "run-filtered", status: "running" }],
+    })
+    expect(capturedQuery).toEqual({
+      limit: 10,
+      parentRunId: "11111111-1111-4111-8111-111111111111",
+      search: "run",
+      status: "running",
+      taskQueue: "priority",
+      workflowName: "demo-delivery",
+    })
+
+    await operatorApp.close()
+  })
+
+  it("returns run lineage for operator inspection", async () => {
+    const store = {
+      ...createStoreStub(),
+      async getRun() {
+        return createRunRecord({ id: "run-1", status: "completed" })
+      },
+      async listRunLineage() {
+        return [
+          createRunRecord({ id: "run-1", status: "completed" }),
+          createRunRecord({
+            id: "run-2",
+            branchedFromRunId: "run-1",
+            branchedFromAttemptRunId: "run-1",
+            branchedFromAttemptId: "attempt-1",
+            status: "queued",
+          }),
+        ]
+      },
+    }
+    const operatorApp = createApp({
+      auth: createAuth(),
+      engine: createWorkflowEngine({
+        definitions: [demoWorkflow],
+        metrics: createMetrics(),
+        store,
+      }),
+      metrics: createMetrics(),
+      store,
+    })
+
+    const response = await operatorApp.inject({
+      method: "GET",
+      url: "/v1/operators/runs/11111111-1111-4111-8111-111111111111/lineage",
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({
+      runs: [
+        { id: "run-1", status: "completed" },
+        { id: "run-2", branchedFromRunId: "run-1", status: "queued" },
+      ],
+    })
+
+    await operatorApp.close()
   })
 
   it("requires a signed callback when a callback secret is configured", async () => {
@@ -576,9 +703,12 @@ describe("app routes", () => {
     expect(response.statusCode).toBe(202)
     expect(recording.spans.map((span) => span.name)).toEqual([
       "hippo.http.start_run",
+      "hippo.http.api_auth",
       "hippo.workflow.start_run",
     ])
+    expect(recording.spans[0]?.parentName).toBeNull()
     expect(recording.spans[1]?.parentName).toBe("hippo.http.start_run")
+    expect(recording.spans[2]?.parentName).toBe("hippo.http.start_run")
 
     await tracedApp.close()
   })

@@ -654,6 +654,7 @@ export const renderRunDetailDocument = (args: {
   attempts: string
   events: string
   lastEventId: number
+  lineage: string
   run: WorkflowRunRecord | null
   workflowMermaid: string
 }) => `<!doctype html>
@@ -735,6 +736,11 @@ export const renderRunDetailDocument = (args: {
       }
 
       .card-list { display: grid; gap: 0.75rem; }
+      .lineage-grid {
+        display: grid;
+        gap: 0.75rem;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      }
 
       .entry {
         padding: 1rem;
@@ -854,6 +860,13 @@ export const renderRunDetailDocument = (args: {
       </section>
       <article class="card">
         <div class="card-header">
+          <h3 class="card-title">Lineage</h3>
+          <p class="card-description">Parent, continue-as-new, and rewind/fork relationships for this run.</p>
+        </div>
+        <div class="card-content lineage-grid">${args.lineage}</div>
+      </article>
+      <article class="card">
+        <div class="card-header">
           <h3 class="card-title">Live events</h3>
           <p class="card-description">New events stream in via SSE.</p>
         </div>
@@ -910,4 +923,31 @@ export const renderEventCard = (
   <strong>${escapeHtml(event.eventType)}</strong>
   <time>${escapeHtml(formatDateTime(event.createdAt))}</time>
   <pre>${formatJson(event.payload)}</pre>
+</article>`
+
+export const renderLineageRunCard = (
+  run: Pick<
+    WorkflowRunRecord,
+    | "id"
+    | "definitionName"
+    | "status"
+    | "currentStepKey"
+    | "createdAt"
+    | "parentRunId"
+    | "continuedFromRunId"
+    | "branchedFromRunId"
+    | "supersededByRunId"
+  >
+) => `<article class="entry">
+  <strong><a class="run-title" href="${dashboardRunPath(run.id)}">${escapeHtml(run.definitionName)}</a></strong>
+  <time>${escapeHtml(formatDateTime(run.createdAt))}</time>
+  <pre>${formatJson({
+    id: run.id,
+    status: run.status,
+    currentStepKey: run.currentStepKey,
+    parentRunId: run.parentRunId,
+    continuedFromRunId: run.continuedFromRunId,
+    branchedFromRunId: run.branchedFromRunId,
+    supersededByRunId: run.supersededByRunId,
+  })}</pre>
 </article>`

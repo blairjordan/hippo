@@ -1,0 +1,26 @@
+{
+  "name": "@hippo/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Hippo core engine, store, tracing, and shared runtime types",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@pgtyped/runtime": "2.4.2",
+    "pg": "8.16.3",
+    "prom-client": "15.1.3"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/src/core.d.ts",
+      "default": "./dist/src/core.js"
+    }
+  }
+}

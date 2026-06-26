@@ -255,6 +255,7 @@ const createStoreStub = () => {
         parentStepKey: null,
         continuedFromRunId: run.id,
         branchedFromRunId: null,
+        branchedFromAttemptRunId: null,
         branchedFromAttemptId: null,
         supersededByRunId: null,
         definitionName: run.definitionName,
@@ -771,6 +772,13 @@ const createStoreStub = () => {
     async requestCancelRun() {
       throw new Error("not used")
     },
+    async listRunLineage(runId: string) {
+      const run = runs.get(runId)
+      return run ? [run] : []
+    },
+    async listRuns() {
+      return [...runs.values()]
+    },
     async branchRun() {
       throw new Error("not used")
     },
@@ -790,6 +798,7 @@ const createStoreStub = () => {
         parentStepKey: args.parentStepKey ?? null,
         continuedFromRunId: null,
         branchedFromRunId: null,
+        branchedFromAttemptRunId: null,
         branchedFromAttemptId: null,
         supersededByRunId: null,
         definitionName: args.definitionName,

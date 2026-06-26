@@ -23,6 +23,7 @@ import {
   renderDashboardDocument,
   renderDashboardRun,
   renderEventCard,
+  renderLineageRunCard,
   renderRunDetailDocument,
   renderWorkflowCard,
 } from "./dashboard.js"
@@ -52,6 +53,25 @@ const resumeBodySchema = z.object({
 
 const operatorListQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(200).default(50),
+})
+
+const operatorRunsQuerySchema = z.object({
+  limit: z.coerce.number().int().positive().max(200).default(50),
+  parentRunId: z.uuid().optional(),
+  search: z.string().trim().min(1).max(200).optional(),
+  status: z
+    .enum([
+      "queued",
+      "running",
+      "waiting",
+      "completed",
+      "failed",
+      "compensation_failed",
+      "canceled",
+    ])
+    .optional(),
+  taskQueue: z.string().trim().min(1).max(200).optional(),
+  workflowName: z.string().trim().min(1).max(200).optional(),
 })
 
 const stuckRunsQuerySchema = z.object({
@@ -147,14 +167,36 @@ const projectRunContext = (source: JsonObject, keys: string[]) => {
   )
 }
 
-const requireApiAuth = (
+const requireApiAuth = async (
   app: FastifyInstance,
   request: FastifyRequest,
-  auth: HippoAuth
+  auth: HippoAuth,
+  tracer?: HippoTracer
 ) => {
-  if (!auth.verifyApiRequest(request)) {
-    throw app.httpErrors.unauthorized()
+  const verify = () => {
+    if (!auth.verifyApiRequest(request)) {
+      throw app.httpErrors.unauthorized()
+    }
   }
+
+  if (!tracer) {
+    verify()
+    return
+  }
+
+  await tracer.withSpan(
+    {
+      name: "hippo.http.api_auth",
+      attributes: createRouteTraceAttributes({
+        method: request.method,
+        operation: "http.api_auth",
+        route: request.routeOptions.url ?? request.url,
+      }),
+    },
+    async () => {
+      verify()
+    }
+  )
 }
 
 const getIdempotencyKey = (request: FastifyRequest) => {
@@ -241,6 +283,34 @@ const traceRequest = <T>(
   run: () => Promise<T>
 ) => tracer.withSpan(input, run)
 
+const traceAuthedRequest = <T>(args: {
+  app: FastifyInstance
+  auth: HippoAuth
+  request: FastifyRequest
+  tracer: HippoTracer
+  trace: {
+    name: string
+    attributes?: Record<string, string | number | boolean>
+  }
+  run: () => Promise<T>
+}) =>
+  traceRequest(args.tracer, args.trace, async () => {
+    await requireApiAuth(args.app, args.request, args.auth, args.tracer)
+    return args.run()
+  })
+
+const createRouteTraceAttributes = (args: {
+  method: string
+  operation: string
+  route: string
+}) => ({
+  ...createTraceAttributes({
+    operation: args.operation,
+  }),
+  "http.method": args.method,
+  "http.route": args.route,
+})
+
 export const createWorkflowRoutes = (args: {
   auth: HippoAuth
   engine: WorkflowEngine
@@ -252,93 +322,127 @@ export const createWorkflowRoutes = (args: {
   tracer: HippoTracer
 }): FastifyPluginAsync => async (app) => {
   app.get("/dashboard", async (request, reply) => {
-    requireApiAuth(app, request, args.auth)
+    return traceAuthedRequest({
+      app,
+      auth: args.auth,
+      request,
+      tracer: args.tracer,
+      trace: {
+        name: "hippo.http.dashboard_overview",
+        attributes: createRouteTraceAttributes({
+          method: request.method,
+          operation: "http.dashboard_overview",
+          route: "/dashboard",
+        }),
+      },
+      run: async () => {
+        const [activeRuns, failedRuns] = await Promise.all([
+          args.store.listActiveRuns(25),
+          args.store.listFailedRuns(25),
+        ])
+        const workflows = args.engine.listWorkflows()
+        const document = renderDashboardDocument({
+          activeRunsHtml:
+            activeRuns.length > 0
+              ? activeRuns.map(renderDashboardRun).join("")
+              : '<div class="empty">No active runs.</div>',
+          failedRunsHtml:
+            failedRuns.length > 0
+              ? failedRuns.map(renderDashboardRun).join("")
+              : '<div class="empty">No failed runs.</div>',
+          workflowsHtml:
+            workflows.length > 0
+              ? workflows
+                  .map((workflow) =>
+                    renderWorkflowCard({
+                      mermaid: renderWorkflowAsMermaid(workflow),
+                      workflowName: workflow.name,
+                      ...(workflow.title === undefined
+                        ? {}
+                        : { workflowTitle: workflow.title }),
+                    })
+                  )
+                  .join("")
+              : '<div class="empty">No workflows are registered.</div>',
+        })
 
-    const [activeRuns, failedRuns] = await Promise.all([
-      args.store.listActiveRuns(25),
-      args.store.listFailedRuns(25),
-    ])
-    const workflows = args.engine.listWorkflows()
-    const document = renderDashboardDocument({
-      activeRunsHtml:
-        activeRuns.length > 0
-          ? activeRuns.map(renderDashboardRun).join("")
-          : '<div class="empty">No active runs.</div>',
-      failedRunsHtml:
-        failedRuns.length > 0
-          ? failedRuns.map(renderDashboardRun).join("")
-          : '<div class="empty">No failed runs.</div>',
-      workflowsHtml:
-        workflows.length > 0
-          ? workflows
-              .map((workflow) =>
-                renderWorkflowCard({
-                  mermaid: renderWorkflowAsMermaid(workflow),
-                  workflowName: workflow.name,
-                  ...(workflow.title === undefined
-                    ? {}
-                    : { workflowTitle: workflow.title }),
-                })
-              )
-              .join("")
-          : '<div class="empty">No workflows are registered.</div>',
+        reply.header("content-type", "text/html; charset=utf-8")
+        return document
+      },
     })
-
-    reply.header("content-type", "text/html; charset=utf-8")
-    return document
   })
 
   app.get("/dashboard/runs/:runId", async (request, reply) => {
-    requireApiAuth(app, request, args.auth)
+    return traceAuthedRequest({
+      app,
+      auth: args.auth,
+      request,
+      tracer: args.tracer,
+      trace: {
+        name: "hippo.http.dashboard_run_detail",
+        attributes: createRouteTraceAttributes({
+          method: request.method,
+          operation: "http.dashboard_run_detail",
+          route: "/dashboard/runs/:runId",
+        }),
+      },
+      run: async () => {
+        const params = runIdParamsSchema.parse(request.params)
+        const run = await getExistingRun(app, args.store, params.runId)
+        const [events, attempts, lineage] = await Promise.all([
+          args.store.getRunEvents(run.id),
+          args.store.getRunAttempts(run.id),
+          args.store.listRunLineage(run.id),
+        ])
+        const workflow = args.engine.getWorkflow(
+          run.definitionName,
+          run.definitionVersion
+        )
+        const document = renderRunDetailDocument({
+          attempts:
+            attempts.length > 0
+              ? attempts.map(renderAttemptCard).join("")
+              : '<div class="entry">No attempts recorded yet.</div>',
+          events:
+            events.length > 0
+              ? events.map(renderEventCard).join("")
+              : '<div class="entry">No workflow events recorded yet.</div>',
+          lastEventId: events.at(-1)?.id ?? 0,
+          lineage:
+            lineage.length > 0
+              ? lineage.map(renderLineageRunCard).join("")
+              : '<div class="entry">No lineage recorded yet.</div>',
+          run,
+          workflowMermaid: renderWorkflowAsMermaid(workflow, {
+            ...(run.currentStepKey === null
+              ? {}
+              : { highlightedStepKey: run.currentStepKey }),
+          }),
+        })
 
-    const params = runIdParamsSchema.parse(request.params)
-    const run = await getExistingRun(app, args.store, params.runId)
-    const [events, attempts] = await Promise.all([
-      args.store.getRunEvents(run.id),
-      args.store.getRunAttempts(run.id),
-    ])
-    const workflow = args.engine.getWorkflow(
-      run.definitionName,
-      run.definitionVersion
-    )
-    const document = renderRunDetailDocument({
-      attempts:
-        attempts.length > 0
-          ? attempts.map(renderAttemptCard).join("")
-          : '<div class="entry">No attempts recorded yet.</div>',
-      events:
-      events.length > 0
-          ? events.map(renderEventCard).join("")
-          : '<div class="entry">No workflow events recorded yet.</div>',
-      lastEventId: events.at(-1)?.id ?? 0,
-      run,
-      workflowMermaid: renderWorkflowAsMermaid(workflow, {
-        ...(run.currentStepKey === null
-          ? {}
-          : { highlightedStepKey: run.currentStepKey }),
-      }),
+        reply.header("content-type", "text/html; charset=utf-8")
+        return document
+      },
     })
-
-    reply.header("content-type", "text/html; charset=utf-8")
-    return document
   })
 
   app.post("/v1/workflows/:workflowName/runs", async (request, reply) => {
-    requireApiAuth(app, request, args.auth)
-
-    return traceRequest(
-      args.tracer,
-      {
+    return traceAuthedRequest({
+      app,
+      auth: args.auth,
+      request,
+      tracer: args.tracer,
+      trace: {
         name: "hippo.http.start_run",
         attributes: {
-          ...createTraceAttributes({
+          ...createRouteTraceAttributes({
+            method: request.method,
             operation: "http.start_run",
+            route: "/v1/workflows/:workflowName/runs",
           }),
-          "http.method": request.method,
-          "http.route": "/v1/workflows/:workflowName/runs",
         },
       },
-      async () => {
+      run: async () => {
         const params = workflowNameParamsSchema.parse(request.params)
         const body = startRunBodySchema.parse(request.body ?? {})
         const idempotencyKey = getIdempotencyKey(request)
@@ -365,53 +469,157 @@ export const createWorkflowRoutes = (args: {
           taskQueue: run.taskQueue,
           priority: run.priority,
         }
-      }
-    )
+      },
+    })
+  })
+
+  app.get("/v1/operators/runs", async (request) => {
+    return traceAuthedRequest({
+      app,
+      auth: args.auth,
+      request,
+      tracer: args.tracer,
+      trace: {
+        name: "hippo.http.list_runs",
+        attributes: createRouteTraceAttributes({
+          method: request.method,
+          operation: "http.list_runs",
+          route: "/v1/operators/runs",
+        }),
+      },
+      run: async () => {
+        const query = operatorRunsQuerySchema.parse(request.query)
+        return {
+          runs: await args.store.listRuns({
+            limit: query.limit,
+            ...(query.parentRunId === undefined
+              ? {}
+              : { parentRunId: query.parentRunId }),
+            ...(query.search === undefined ? {} : { search: query.search }),
+            ...(query.status === undefined ? {} : { status: query.status }),
+            ...(query.taskQueue === undefined
+              ? {}
+              : { taskQueue: query.taskQueue }),
+            ...(query.workflowName === undefined
+              ? {}
+              : { workflowName: query.workflowName }),
+          }),
+        }
+      },
+    })
   })
 
   app.get("/v1/operators/runs/active", async (request) => {
-    requireApiAuth(app, request, args.auth)
-
-    const query = operatorListQuerySchema.parse(request.query)
-    return {
-      runs: await args.store.listActiveRuns(query.limit),
-    }
+    return traceAuthedRequest({
+      app,
+      auth: args.auth,
+      request,
+      tracer: args.tracer,
+      trace: {
+        name: "hippo.http.list_active_runs",
+        attributes: createRouteTraceAttributes({
+          method: request.method,
+          operation: "http.list_active_runs",
+          route: "/v1/operators/runs/active",
+        }),
+      },
+      run: async () => {
+        const query = operatorListQuerySchema.parse(request.query)
+        return {
+          runs: await args.store.listActiveRuns(query.limit),
+        }
+      },
+    })
   })
 
   app.get("/v1/operators/runs/failed", async (request) => {
-    requireApiAuth(app, request, args.auth)
-
-    const query = operatorListQuerySchema.parse(request.query)
-    return {
-      runs: await args.store.listFailedRuns(query.limit),
-    }
+    return traceAuthedRequest({
+      app,
+      auth: args.auth,
+      request,
+      tracer: args.tracer,
+      trace: {
+        name: "hippo.http.list_failed_runs",
+        attributes: createRouteTraceAttributes({
+          method: request.method,
+          operation: "http.list_failed_runs",
+          route: "/v1/operators/runs/failed",
+        }),
+      },
+      run: async () => {
+        const query = operatorListQuerySchema.parse(request.query)
+        return {
+          runs: await args.store.listFailedRuns(query.limit),
+        }
+      },
+    })
   })
 
   app.get("/v1/operators/runs/stuck", async (request) => {
-    requireApiAuth(app, request, args.auth)
+    return traceAuthedRequest({
+      app,
+      auth: args.auth,
+      request,
+      tracer: args.tracer,
+      trace: {
+        name: "hippo.http.list_stuck_runs",
+        attributes: createRouteTraceAttributes({
+          method: request.method,
+          operation: "http.list_stuck_runs",
+          route: "/v1/operators/runs/stuck",
+        }),
+      },
+      run: async () => {
+        const query = stuckRunsQuerySchema.parse(request.query)
+        return {
+          runs: await args.store.listStuckRuns(query),
+        }
+      },
+    })
+  })
 
-    const query = stuckRunsQuerySchema.parse(request.query)
-    return {
-      runs: await args.store.listStuckRuns(query),
-    }
+  app.get("/v1/operators/runs/:runId/lineage", async (request) => {
+    return traceAuthedRequest({
+      app,
+      auth: args.auth,
+      request,
+      tracer: args.tracer,
+      trace: {
+        name: "hippo.http.run_lineage",
+        attributes: createRouteTraceAttributes({
+          method: request.method,
+          operation: "http.run_lineage",
+          route: "/v1/operators/runs/:runId/lineage",
+        }),
+      },
+      run: async () => {
+        const params = runIdParamsSchema.parse(request.params)
+        await getExistingRun(app, args.store, params.runId)
+
+        return {
+          runs: await args.store.listRunLineage(params.runId),
+        }
+      },
+    })
   })
 
   app.post("/v1/operators/runs/:runId/cancel", async (request) => {
-    requireApiAuth(app, request, args.auth)
-
-    return traceRequest(
-      args.tracer,
-      {
+    return traceAuthedRequest({
+      app,
+      auth: args.auth,
+      request,
+      tracer: args.tracer,
+      trace: {
         name: "hippo.http.cancel_run",
         attributes: {
-          ...createTraceAttributes({
+          ...createRouteTraceAttributes({
+            method: request.method,
             operation: "http.cancel_run",
+            route: "/v1/operators/runs/:runId/cancel",
           }),
-          "http.method": request.method,
-          "http.route": "/v1/operators/runs/:runId/cancel",
         },
       },
-      async () => {
+      run: async () => {
         const params = runIdParamsSchema.parse(request.params)
         const body = cancelRunBodySchema.parse(request.body ?? {})
         const existingRun = await getExistingRun(app, args.store, params.runId)
@@ -458,385 +666,575 @@ export const createWorkflowRoutes = (args: {
           status: compensatedRun?.status ?? run.status,
           currentStepKey: compensatedRun?.currentStepKey ?? run.currentStepKey,
         }
-      }
-    )
+      },
+    })
   })
 
   app.post("/v1/operators/runs/:runId/terminate", async (request) => {
-    requireApiAuth(app, request, args.auth)
+    return traceAuthedRequest({
+      app,
+      auth: args.auth,
+      request,
+      tracer: args.tracer,
+      trace: {
+        name: "hippo.http.terminate_run",
+        attributes: createRouteTraceAttributes({
+          method: request.method,
+          operation: "http.terminate_run",
+          route: "/v1/operators/runs/:runId/terminate",
+        }),
+      },
+      run: async () => {
+        const params = runIdParamsSchema.parse(request.params)
+        const body = z
+          .object({
+            reason: z.string().min(1).max(1_000).optional(),
+          })
+          .parse(request.body ?? {})
 
-    const params = runIdParamsSchema.parse(request.params)
-    const body = z
-      .object({
-        reason: z.string().min(1).max(1_000).optional(),
-      })
-      .parse(request.body ?? {})
+        const run = await args.store.requestCancelRun({
+          runId: params.runId,
+          mode: "hard",
+          ...(body.reason === undefined ? {} : { reason: body.reason }),
+        })
 
-    const run = await args.store.requestCancelRun({
-      runId: params.runId,
-      mode: "hard",
-      ...(body.reason === undefined ? {} : { reason: body.reason }),
+        if (!run) {
+          throw app.httpErrors.conflict(
+            `Run "${params.runId}" could not be terminated`
+          )
+        }
+
+        await propagateCancellation({
+          mode: "hard",
+          reason: body.reason,
+          runId: run.id,
+          store: args.store,
+        })
+
+        const compensatedRun = await compensateRunTree({
+          engine: args.engine,
+          runId: run.id,
+          store: args.store,
+        })
+
+        return {
+          runId: run.id,
+          status: compensatedRun?.status ?? run.status,
+          currentStepKey: compensatedRun?.currentStepKey ?? run.currentStepKey,
+        }
+      },
     })
-
-    if (!run) {
-      throw app.httpErrors.conflict(
-        `Run "${params.runId}" could not be terminated`
-      )
-    }
-
-    await propagateCancellation({
-      mode: "hard",
-      reason: body.reason,
-      runId: run.id,
-      store: args.store,
-    })
-
-    const compensatedRun = await compensateRunTree({
-      engine: args.engine,
-      runId: run.id,
-      store: args.store,
-    })
-
-    return {
-      runId: run.id,
-      status: compensatedRun?.status ?? run.status,
-      currentStepKey: compensatedRun?.currentStepKey ?? run.currentStepKey,
-    }
   })
 
   app.post("/v1/operators/runs/:runId/retry", async (request, reply) => {
-    requireApiAuth(app, request, args.auth)
+    return traceAuthedRequest({
+      app,
+      auth: args.auth,
+      request,
+      tracer: args.tracer,
+      trace: {
+        name: "hippo.http.retry_run",
+        attributes: createRouteTraceAttributes({
+          method: request.method,
+          operation: "http.retry_run",
+          route: "/v1/operators/runs/:runId/retry",
+        }),
+      },
+      run: async () => {
+        const params = runIdParamsSchema.parse(request.params)
+        const existingRun = await getExistingRun(app, args.store, params.runId)
 
-    const params = runIdParamsSchema.parse(request.params)
-    const existingRun = await getExistingRun(app, args.store, params.runId)
+        if (existingRun.status !== "failed") {
+          throw app.httpErrors.conflict(
+            `Run "${params.runId}" cannot be retried from status "${existingRun.status}"`
+          )
+        }
 
-    if (existingRun.status !== "failed") {
-      throw app.httpErrors.conflict(
-        `Run "${params.runId}" cannot be retried from status "${existingRun.status}"`
-      )
-    }
+        const run = await args.store.retryRun(params.runId)
 
-    const run = await args.store.retryRun(params.runId)
+        if (!run) {
+          throw app.httpErrors.conflict(
+            `Run "${params.runId}" could not be retried`
+          )
+        }
 
-    if (!run) {
-      throw app.httpErrors.conflict(
-        `Run "${params.runId}" could not be retried`
-      )
-    }
-
-    reply.code(202)
-    return {
-      runId: run.id,
-      status: run.status,
-      currentStepKey: run.currentStepKey,
-    }
+        reply.code(202)
+        return {
+          runId: run.id,
+          status: run.status,
+          currentStepKey: run.currentStepKey,
+        }
+      },
+    })
   })
 
   app.post("/v1/operators/runs/:runId/rewind", async (request, reply) => {
-    requireApiAuth(app, request, args.auth)
+    return traceAuthedRequest({
+      app,
+      auth: args.auth,
+      request,
+      tracer: args.tracer,
+      trace: {
+        name: "hippo.http.rewind_run",
+        attributes: createRouteTraceAttributes({
+          method: request.method,
+          operation: "http.rewind_run",
+          route: "/v1/operators/runs/:runId/rewind",
+        }),
+      },
+      run: async () => {
+        const params = runIdParamsSchema.parse(request.params)
+        const body = rewindRunBodySchema.parse(request.body ?? {})
+        const existingRun = await getExistingRun(app, args.store, params.runId)
 
-    const params = runIdParamsSchema.parse(request.params)
-    const body = rewindRunBodySchema.parse(request.body ?? {})
-    const existingRun = await getExistingRun(app, args.store, params.runId)
+        if (!terminalRunStatuses.has(existingRun.status)) {
+          throw app.httpErrors.conflict(
+            `Run "${params.runId}" must be terminal before rewind`
+          )
+        }
 
-    if (!terminalRunStatuses.has(existingRun.status)) {
-      throw app.httpErrors.conflict(
-        `Run "${params.runId}" must be terminal before rewind`
-      )
-    }
+        if (existingRun.supersededByRunId) {
+          throw app.httpErrors.conflict(
+            `Run "${params.runId}" has already been rewound`
+          )
+        }
 
-    if (existingRun.supersededByRunId) {
-      throw app.httpErrors.conflict(
-        `Run "${params.runId}" has already been rewound`
-      )
-    }
+        const run = await args.store.branchRun({
+          runId: params.runId,
+          attemptId: body.toAttemptId,
+          mode: "rewind",
+        })
 
-    const run = await args.store.branchRun({
-      runId: params.runId,
-      attemptId: body.toAttemptId,
-      mode: "rewind",
+        if (!run) {
+          throw app.httpErrors.notFound(`Run "${params.runId}" not found`)
+        }
+
+        reply.code(202)
+        return {
+          runId: run.id,
+          sourceRunId: params.runId,
+          status: run.status,
+          currentStepKey: run.currentStepKey,
+        }
+      },
     })
-
-    if (!run) {
-      throw app.httpErrors.notFound(`Run "${params.runId}" not found`)
-    }
-
-    reply.code(202)
-    return {
-      runId: run.id,
-      sourceRunId: params.runId,
-      status: run.status,
-      currentStepKey: run.currentStepKey,
-    }
   })
 
   app.post("/v1/operators/runs/:runId/fork", async (request, reply) => {
-    requireApiAuth(app, request, args.auth)
+    return traceAuthedRequest({
+      app,
+      auth: args.auth,
+      request,
+      tracer: args.tracer,
+      trace: {
+        name: "hippo.http.fork_run",
+        attributes: createRouteTraceAttributes({
+          method: request.method,
+          operation: "http.fork_run",
+          route: "/v1/operators/runs/:runId/fork",
+        }),
+      },
+      run: async () => {
+        const params = runIdParamsSchema.parse(request.params)
+        const body = forkRunBodySchema.parse(request.body ?? {})
+        const existingRun = await getExistingRun(app, args.store, params.runId)
 
-    const params = runIdParamsSchema.parse(request.params)
-    const body = forkRunBodySchema.parse(request.body ?? {})
-    const existingRun = await getExistingRun(app, args.store, params.runId)
+        if (!terminalRunStatuses.has(existingRun.status)) {
+          throw app.httpErrors.conflict(
+            `Run "${params.runId}" must be terminal before fork`
+          )
+        }
 
-    if (!terminalRunStatuses.has(existingRun.status)) {
-      throw app.httpErrors.conflict(
-        `Run "${params.runId}" must be terminal before fork`
-      )
-    }
+        const run = await args.store.branchRun({
+          runId: params.runId,
+          attemptId: body.fromAttemptId,
+          mode: "fork",
+        })
 
-    const run = await args.store.branchRun({
-      runId: params.runId,
-      attemptId: body.fromAttemptId,
-      mode: "fork",
+        if (!run) {
+          throw app.httpErrors.notFound(`Run "${params.runId}" not found`)
+        }
+
+        reply.code(202)
+        return {
+          runId: run.id,
+          sourceRunId: params.runId,
+          status: run.status,
+          currentStepKey: run.currentStepKey,
+        }
+      },
     })
-
-    if (!run) {
-      throw app.httpErrors.notFound(`Run "${params.runId}" not found`)
-    }
-
-    reply.code(202)
-    return {
-      runId: run.id,
-      sourceRunId: params.runId,
-      status: run.status,
-      currentStepKey: run.currentStepKey,
-    }
   })
 
   app.post("/v1/operators/recovery/reconcile", async (request) => {
-    requireApiAuth(app, request, args.auth)
+    return traceAuthedRequest({
+      app,
+      auth: args.auth,
+      request,
+      tracer: args.tracer,
+      trace: {
+        name: "hippo.http.reconcile_recovery",
+        attributes: createRouteTraceAttributes({
+          method: request.method,
+          operation: "http.reconcile_recovery",
+          route: "/v1/operators/recovery/reconcile",
+        }),
+      },
+      run: async () => {
+        const body = reconcileBodySchema.parse(request.body ?? {})
+        const reclaimed = await runRecoveryPass({
+          limit: body.limit,
+          metrics: args.metrics,
+          store: args.store,
+          tracer: args.tracer,
+        })
 
-    const body = reconcileBodySchema.parse(request.body ?? {})
-    const reclaimed = await runRecoveryPass({
-      limit: body.limit,
-      metrics: args.metrics,
-      store: args.store,
+        return {
+          reclaimed,
+        }
+      },
     })
-
-    return {
-      reclaimed,
-    }
   })
 
   app.post("/v1/operators/schedules", async (request, reply) => {
-    requireApiAuth(app, request, args.auth)
+    return traceAuthedRequest({
+      app,
+      auth: args.auth,
+      request,
+      tracer: args.tracer,
+      trace: {
+        name: "hippo.http.create_schedule",
+        attributes: createRouteTraceAttributes({
+          method: request.method,
+          operation: "http.create_schedule",
+          route: "/v1/operators/schedules",
+        }),
+      },
+      run: async () => {
+        const body = createScheduleBodySchema.parse(request.body ?? {})
 
-    const body = createScheduleBodySchema.parse(request.body ?? {})
+        if (!args.engine.hasWorkflow(body.workflowName)) {
+          throw app.httpErrors.notFound(
+            `Workflow "${body.workflowName}" is not registered`
+          )
+        }
 
-    if (!args.engine.hasWorkflow(body.workflowName)) {
-      throw app.httpErrors.notFound(
-        `Workflow "${body.workflowName}" is not registered`
-      )
-    }
+        const schedule = await args.store.createSchedule({
+          workflowName: body.workflowName,
+          cronExpression: body.cronExpression,
+          payload: body.payload,
+          taskQueue: body.taskQueue,
+          priority: body.priority,
+          nextFireAt: computeNextScheduleFireAt({
+            cronExpression: body.cronExpression,
+          }),
+        })
 
-    const schedule = await args.store.createSchedule({
-      workflowName: body.workflowName,
-      cronExpression: body.cronExpression,
-      payload: body.payload,
-      taskQueue: body.taskQueue,
-      priority: body.priority,
-      nextFireAt: computeNextScheduleFireAt({
-        cronExpression: body.cronExpression,
-      }),
+        reply.code(201)
+        return {
+          schedule,
+        }
+      },
     })
-
-    reply.code(201)
-    return {
-      schedule,
-    }
   })
 
   app.post("/v1/runs/:runId/signals/:signalName", async (request, reply) => {
-    requireApiAuth(app, request, args.auth)
+    return traceAuthedRequest({
+      app,
+      auth: args.auth,
+      request,
+      tracer: args.tracer,
+      trace: {
+        name: "hippo.http.create_signal",
+        attributes: createRouteTraceAttributes({
+          method: request.method,
+          operation: "http.create_signal",
+          route: "/v1/runs/:runId/signals/:signalName",
+        }),
+      },
+      run: async () => {
+        const params = signalParamsSchema.parse(request.params)
+        const body = z
+          .object({
+            payload: jsonValueSchema.optional(),
+          })
+          .parse(request.body ?? {})
+        const runId = await args.store.createSignal({
+          runId: params.runId,
+          signalName: params.signalName,
+          payload: body.payload ?? null,
+        })
 
-    const params = signalParamsSchema.parse(request.params)
-    const body = z
-      .object({
-        payload: jsonValueSchema.optional(),
-      })
-      .parse(request.body ?? {})
-    const runId = await args.store.createSignal({
-      runId: params.runId,
-      signalName: params.signalName,
-      payload: body.payload ?? null,
+        if (!runId) {
+          throw app.httpErrors.notFound(`Run "${params.runId}" not found`)
+        }
+
+        reply.code(202)
+        return {
+          runId,
+          signalName: params.signalName,
+        }
+      },
     })
-
-    if (!runId) {
-      throw app.httpErrors.notFound(`Run "${params.runId}" not found`)
-    }
-
-    reply.code(202)
-    return {
-      runId,
-      signalName: params.signalName,
-    }
   })
 
   app.get("/v1/runs/:runId", async (request) => {
-    requireApiAuth(app, request, args.auth)
+    return traceAuthedRequest({
+      app,
+      auth: args.auth,
+      request,
+      tracer: args.tracer,
+      trace: {
+        name: "hippo.http.get_run",
+        attributes: createRouteTraceAttributes({
+          method: request.method,
+          operation: "http.get_run",
+          route: "/v1/runs/:runId",
+        }),
+      },
+      run: async () => {
+        const params = runIdParamsSchema.parse(request.params)
+        const run = await args.store.getRun(params.runId)
 
-    const params = runIdParamsSchema.parse(request.params)
-    const run = await args.store.getRun(params.runId)
+        if (!run) {
+          throw app.httpErrors.notFound(`Run "${params.runId}" not found`)
+        }
 
-    if (!run) {
-      throw app.httpErrors.notFound(`Run "${params.runId}" not found`)
-    }
+        const [events, attempts, lineage] = await Promise.all([
+          args.store.getRunEvents(run.id),
+          args.store.getRunAttempts(run.id),
+          args.store.listRunLineage(run.id),
+        ])
 
-    const [events, attempts] = await Promise.all([
-      args.store.getRunEvents(run.id),
-      args.store.getRunAttempts(run.id),
-    ])
-
-    return {
-      run,
-      attempts,
-      events,
-    }
+        return {
+          run,
+          attempts,
+          events,
+          lineage,
+        }
+      },
+    })
   })
 
   app.get("/v1/runs/:runId/context", async (request) => {
-    requireApiAuth(app, request, args.auth)
+    return traceAuthedRequest({
+      app,
+      auth: args.auth,
+      request,
+      tracer: args.tracer,
+      trace: {
+        name: "hippo.http.get_run_context",
+        attributes: createRouteTraceAttributes({
+          method: request.method,
+          operation: "http.get_run_context",
+          route: "/v1/runs/:runId/context",
+        }),
+      },
+      run: async () => {
+        const params = runIdParamsSchema.parse(request.params)
+        const query = runContextQuerySchema.parse(request.query)
+        const run = await getExistingRun(app, args.store, params.runId)
+        const keys =
+          query.keys
+            ?.split(",")
+            .map((value) => value.trim())
+            .filter((value) => value.length > 0) ?? []
 
-    const params = runIdParamsSchema.parse(request.params)
-    const query = runContextQuerySchema.parse(request.query)
-    const run = await getExistingRun(app, args.store, params.runId)
-    const keys =
-      query.keys
-        ?.split(",")
-        .map((value) => value.trim())
-        .filter((value) => value.length > 0) ?? []
-
-    return {
-      runId: run.id,
-      workflowName: run.definitionName,
-      context: projectRunContext(run.context, keys),
-    }
+        return {
+          runId: run.id,
+          workflowName: run.definitionName,
+          context: projectRunContext(run.context, keys),
+        }
+      },
+    })
   })
 
   app.get("/v1/runs/:runId/stream", async (request, reply) => {
-    requireApiAuth(app, request, args.auth)
+    return traceAuthedRequest({
+      app,
+      auth: args.auth,
+      request,
+      tracer: args.tracer,
+      trace: {
+        name: "hippo.http.stream_run_events",
+        attributes: createRouteTraceAttributes({
+          method: request.method,
+          operation: "http.stream_run_events",
+          route: "/v1/runs/:runId/stream",
+        }),
+      },
+      run: async () => {
+        const params = runIdParamsSchema.parse(request.params)
+        const query = runStreamQuerySchema.parse(request.query)
+        await getExistingRun(app, args.store, params.runId)
 
-    const params = runIdParamsSchema.parse(request.params)
-    const query = runStreamQuerySchema.parse(request.query)
-    await getExistingRun(app, args.store, params.runId)
-
-    reply.hijack()
-    reply.raw.writeHead(200, {
-      "cache-control": "no-cache, no-transform",
-      connection: "keep-alive",
-      "content-type": "text/event-stream; charset=utf-8",
-    })
-
-    let active = true
-    let lastEventId = Math.max(
-      Number(request.headers["last-event-id"] ?? 0) || 0,
-      query.afterEventId
-    )
-    let sending = false
-
-    const sendPendingEvents = async () => {
-      if (!active || sending) {
-        return
-      }
-
-      sending = true
-
-      try {
-        const events = await args.store.getRunEvents(params.runId)
-
-        for (const event of events) {
-          if (event.id <= lastEventId) {
-            continue
-          }
-
-          lastEventId = event.id
-          reply.raw.write(`id: ${String(event.id)}\n`)
-          reply.raw.write(`data: ${JSON.stringify({
-            ...event,
-            createdAt: event.createdAt.toISOString(),
-          })}\n\n`)
-        }
-      } finally {
-        sending = false
-      }
-    }
-
-    const heartbeat = setInterval(() => {
-      if (active) {
-        reply.raw.write(": keepalive\n\n")
-      }
-    }, 15_000)
-    const poller = setInterval(() => {
-      void sendPendingEvents()
-    }, 5_000)
-    let stopListening: (() => Promise<void>) | null = null
-
-    if (args.listenForNotifications) {
-      try {
-        stopListening = await args.listenForNotifications((notification) => {
-          if (
-            notification.kind === "run_event" &&
-            notification.runId === params.runId
-          ) {
-            void sendPendingEvents()
-          }
+        reply.hijack()
+        reply.raw.writeHead(200, {
+          "cache-control": "no-cache, no-transform",
+          connection: "keep-alive",
+          "content-type": "text/event-stream; charset=utf-8",
         })
-      } catch {
-        stopListening = null
-      }
-    }
 
-    await sendPendingEvents()
+        let active = true
+        let lastEventId = Math.max(
+          Number(request.headers["last-event-id"] ?? 0) || 0,
+          query.afterEventId
+        )
+        let sending = false
 
-    reply.raw.on("close", () => {
-      active = false
-      clearInterval(heartbeat)
-      clearInterval(poller)
-      void stopListening?.()
+        const sendPendingEvents = async (
+          trigger: "initial" | "poll" | "notification"
+        ) => {
+          if (!active || sending) {
+            return
+          }
+
+          sending = true
+
+          try {
+            await traceRequest(
+              args.tracer,
+              {
+                name: "hippo.http.stream_run_events.flush",
+                attributes: {
+                  ...createTraceAttributes({
+                    operation: "http.stream_run_events.flush",
+                    runId: params.runId,
+                  }),
+                  "hippo.stream.trigger": trigger,
+                },
+              },
+              async () => {
+                const events = await args.store.getRunEvents(params.runId)
+
+                for (const event of events) {
+                  if (event.id <= lastEventId) {
+                    continue
+                  }
+
+                  lastEventId = event.id
+                  reply.raw.write(`id: ${String(event.id)}\n`)
+                  reply.raw.write(`data: ${JSON.stringify({
+                    ...event,
+                    createdAt: event.createdAt.toISOString(),
+                  })}\n\n`)
+                }
+              }
+            )
+          } finally {
+            sending = false
+          }
+        }
+
+        const heartbeat = setInterval(() => {
+          if (active) {
+            reply.raw.write(": keepalive\n\n")
+          }
+        }, 15_000)
+        const poller = setInterval(() => {
+          void sendPendingEvents("poll")
+        }, 5_000)
+        let stopListening: (() => Promise<void>) | null = null
+
+        if (args.listenForNotifications) {
+          try {
+            stopListening = await args.listenForNotifications((notification) => {
+              if (
+                notification.kind === "run_event" &&
+                notification.runId === params.runId
+              ) {
+                void sendPendingEvents("notification")
+              }
+            })
+          } catch {
+            stopListening = null
+          }
+        }
+
+        await sendPendingEvents("initial")
+
+        await new Promise<void>((resolve) => {
+          reply.raw.on("close", () => {
+            active = false
+            clearInterval(heartbeat)
+            clearInterval(poller)
+            void stopListening?.()
+            resolve()
+          })
+        })
+      },
     })
   })
 
   app.post("/v1/waits/:correlationKey/resume", async (request, reply) => {
-    const rawBody = (request.body ?? {}) as JsonValue
-    requireCallbackAuth(app, request, rawBody, args.auth)
+    return traceRequest(
+      args.tracer,
+      {
+        name: "hippo.http.resume_wait",
+        attributes: createRouteTraceAttributes({
+          method: request.method,
+          operation: "http.resume_wait",
+          route: "/v1/waits/:correlationKey/resume",
+        }),
+      },
+      async () => {
+        const rawBody = (request.body ?? {}) as JsonValue
+        requireCallbackAuth(app, request, rawBody, args.auth)
 
-    const params = correlationKeyParamsSchema.parse(request.params)
-    const body = resumeBodySchema.parse(request.body ?? {})
-    const run = await args.engine.resumeWait(
-      body.payload === undefined
-        ? { correlationKey: params.correlationKey }
-        : { correlationKey: params.correlationKey, payload: body.payload }
+        const params = correlationKeyParamsSchema.parse(request.params)
+        const body = resumeBodySchema.parse(request.body ?? {})
+        const run = await args.engine.resumeWait(
+          body.payload === undefined
+            ? { correlationKey: params.correlationKey }
+            : { correlationKey: params.correlationKey, payload: body.payload }
+        )
+
+        if (run.status === "missing") {
+          throw app.httpErrors.notFound(
+            `Open wait "${params.correlationKey}" not found`
+          )
+        }
+
+        reply.code(run.status === "duplicate" ? 200 : 202)
+        return {
+          outcome: run.status,
+          runId: run.run?.id ?? null,
+          status: run.run?.status ?? null,
+          currentStepKey: run.run?.currentStepKey ?? null,
+        }
+      }
     )
-
-    if (run.status === "missing") {
-      throw app.httpErrors.notFound(
-        `Open wait "${params.correlationKey}" not found`
-      )
-    }
-
-    reply.code(run.status === "duplicate" ? 200 : 202)
-    return {
-      outcome: run.status,
-      runId: run.run?.id ?? null,
-      status: run.run?.status ?? null,
-      currentStepKey: run.run?.currentStepKey ?? null,
-    }
   })
 
   app.get("/v1/workflows/:workflowName/render", async (request, reply) => {
-    requireApiAuth(app, request, args.auth)
+    return traceAuthedRequest({
+      app,
+      auth: args.auth,
+      request,
+      tracer: args.tracer,
+      trace: {
+        name: "hippo.http.render_workflow",
+        attributes: createRouteTraceAttributes({
+          method: request.method,
+          operation: "http.render_workflow",
+          route: "/v1/workflows/:workflowName/render",
+        }),
+      },
+      run: async () => {
+        const params = workflowNameParamsSchema.parse(request.params)
 
-    const params = workflowNameParamsSchema.parse(request.params)
+        if (!args.engine.hasWorkflow(params.workflowName)) {
+          throw app.httpErrors.notFound(
+            `Workflow "${params.workflowName}" is not registered`
+          )
+        }
 
-    if (!args.engine.hasWorkflow(params.workflowName)) {
-      throw app.httpErrors.notFound(
-        `Workflow "${params.workflowName}" is not registered`
-      )
-    }
+        const workflow = args.engine.getWorkflow(params.workflowName)
+        const document = renderWorkflowAsMermaid(workflow)
 
-    const workflow = args.engine.getWorkflow(params.workflowName)
-    const document = renderWorkflowAsMermaid(workflow)
-
-    reply.header("content-type", "text/plain; charset=utf-8")
-    return document
+        reply.header("content-type", "text/plain; charset=utf-8")
+        return document
+      },
+    })
   })
 }

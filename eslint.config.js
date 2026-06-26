@@ -42,6 +42,6 @@ export default [
     },
   },
   {
-    ignores: ["dist/**", "node_modules/**", "src/queries/**"],
+    ignores: ["dist/**", "**/dist/**", "node_modules/**", "src/queries/**"],
   },
 ]

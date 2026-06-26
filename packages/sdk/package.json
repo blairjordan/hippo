@@ -1,0 +1,21 @@
+{
+  "name": "@hippo/sdk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Hippo workflow definition helpers and TypeScript-first SDK surface",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {},
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/src/sdk.d.ts",
+      "default": "./dist/src/sdk.js"
+    }
+  }
+}

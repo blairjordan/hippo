@@ -1,6 +1,7 @@
 -- migrate:up
 ALTER TABLE workflow_runs
   ADD COLUMN IF NOT EXISTS branched_from_run_id UUID REFERENCES workflow_runs (id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS branched_from_attempt_run_id UUID,
   ADD COLUMN IF NOT EXISTS superseded_by_run_id UUID REFERENCES workflow_runs (id) ON DELETE SET NULL;
 
 CREATE INDEX IF NOT EXISTS workflow_runs_branched_from_run_id_idx
@@ -34,16 +35,41 @@ CREATE UNIQUE INDEX IF NOT EXISTS workflow_step_attempts_run_id_step_seq_idx
   ON workflow_step_attempts (run_id, step_seq);
 
 ALTER TABLE workflow_runs
-  ADD COLUMN IF NOT EXISTS branched_from_attempt_id UUID REFERENCES workflow_step_attempts (id) ON DELETE SET NULL;
+  ADD COLUMN IF NOT EXISTS branched_from_attempt_id UUID;
 
-CREATE INDEX IF NOT EXISTS workflow_runs_branched_from_attempt_id_idx
-  ON workflow_runs (branched_from_attempt_id);
+CREATE INDEX IF NOT EXISTS workflow_runs_branched_from_attempt_idx
+  ON workflow_runs (branched_from_attempt_run_id, branched_from_attempt_id);
+
+UPDATE workflow_runs
+SET branched_from_attempt_run_id = branched_from_run_id
+WHERE branched_from_attempt_id IS NOT NULL
+  AND branched_from_attempt_run_id IS NULL;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'workflow_runs_branched_from_attempt_fkey'
+  ) THEN
+    ALTER TABLE workflow_runs
+      ADD CONSTRAINT workflow_runs_branched_from_attempt_fkey
+      FOREIGN KEY (branched_from_attempt_run_id, branched_from_attempt_id)
+      REFERENCES workflow_step_attempts (run_id, id)
+      ON DELETE SET NULL;
+  END IF;
+END
+$$;
 
 -- migrate:down
-DROP INDEX IF EXISTS workflow_runs_branched_from_attempt_id_idx;
+ALTER TABLE workflow_runs
+  DROP CONSTRAINT IF EXISTS workflow_runs_branched_from_attempt_fkey;
+
+DROP INDEX IF EXISTS workflow_runs_branched_from_attempt_idx;
 
 ALTER TABLE workflow_runs
-  DROP COLUMN IF EXISTS branched_from_attempt_id;
+  DROP COLUMN IF EXISTS branched_from_attempt_id,
+  DROP COLUMN IF EXISTS branched_from_attempt_run_id;
 
 DROP INDEX IF EXISTS workflow_step_attempts_run_id_step_seq_idx;
 

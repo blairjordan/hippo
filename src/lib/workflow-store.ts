@@ -28,6 +28,8 @@ import {
   insertStepAttempt as insertStepAttemptQuery,
   listActiveRuns as listActiveRunsQuery,
   listFailedRuns as listFailedRunsQuery,
+  listRunLineage as listRunLineageQuery,
+  listRuns as listRunsQuery,
   listStuckRuns as listStuckRunsQuery,
   markRunCompensationFailed as markRunCompensationFailedQuery,
   markRunSuperseded as markRunSupersededQuery,
@@ -70,6 +72,7 @@ type IRunRow = {
   parentStepKey?: string | null
   continuedFromRunId?: string | null
   branchedFromRunId?: string | null
+  branchedFromAttemptRunId?: string | null
   branchedFromAttemptId?: string | null
   supersededByRunId?: string | null
   definitionName: string
@@ -160,6 +163,7 @@ const mapRun = (row: IRunRow): WorkflowRunRecord => ({
       : null,
   continuedFromRunId: row.continuedFromRunId ?? null,
   branchedFromRunId: row.branchedFromRunId ?? null,
+  branchedFromAttemptRunId: row.branchedFromAttemptRunId ?? null,
   branchedFromAttemptId: row.branchedFromAttemptId ?? null,
   supersededByRunId: row.supersededByRunId ?? null,
   taskQueue: row.taskQueue ?? "default",
@@ -400,6 +404,10 @@ export const createWorkflowStore = (
                 parent_run_id AS "parentRunId",
                 parent_step_key AS "parentStepKey",
                 continued_from_run_id AS "continuedFromRunId",
+                branched_from_run_id AS "branchedFromRunId",
+                branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+                branched_from_attempt_id AS "branchedFromAttemptId",
+                superseded_by_run_id AS "supersededByRunId",
                 definition_name AS "definitionName",
                 definition_version AS "definitionVersion",
                 task_queue AS "taskQueue",
@@ -455,6 +463,10 @@ export const createWorkflowStore = (
                 parent_run_id AS "parentRunId",
                 parent_step_key AS "parentStepKey",
                 continued_from_run_id AS "continuedFromRunId",
+                branched_from_run_id AS "branchedFromRunId",
+                branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+                branched_from_attempt_id AS "branchedFromAttemptId",
+                superseded_by_run_id AS "supersededByRunId",
                 definition_name AS "definitionName",
                 definition_version AS "definitionVersion",
                 task_queue AS "taskQueue",
@@ -522,6 +534,10 @@ export const createWorkflowStore = (
               parent_run_id AS "parentRunId",
               parent_step_key AS "parentStepKey",
               continued_from_run_id AS "continuedFromRunId",
+              branched_from_run_id AS "branchedFromRunId",
+              branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+              branched_from_attempt_id AS "branchedFromAttemptId",
+              superseded_by_run_id AS "supersededByRunId",
               definition_name AS "definitionName",
               definition_version AS "definitionVersion",
               task_queue AS "taskQueue",
@@ -681,6 +697,7 @@ export const createWorkflowStore = (
   }) => {
     const [row] = await completeStandaloneStepAttemptQuery.run(
       {
+        runId: args.runId,
         attemptId: args.attemptId,
         output: args.output,
       },
@@ -712,6 +729,7 @@ export const createWorkflowStore = (
   }) => {
     const [row] = await failStandaloneStepAttemptQuery.run(
       {
+        runId: args.runId,
         attemptId: args.attemptId,
         error: args.error,
       },
@@ -821,6 +839,10 @@ export const createWorkflowStore = (
             parent_run_id AS "parentRunId",
             parent_step_key AS "parentStepKey",
             continued_from_run_id AS "continuedFromRunId",
+            branched_from_run_id AS "branchedFromRunId",
+            branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+            branched_from_attempt_id AS "branchedFromAttemptId",
+            superseded_by_run_id AS "supersededByRunId",
             definition_name AS "definitionName",
             definition_version AS "definitionVersion",
             task_queue AS "taskQueue",
@@ -878,6 +900,10 @@ export const createWorkflowStore = (
             parent_run_id AS "parentRunId",
             parent_step_key AS "parentStepKey",
             continued_from_run_id AS "continuedFromRunId",
+            branched_from_run_id AS "branchedFromRunId",
+            branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+            branched_from_attempt_id AS "branchedFromAttemptId",
+            superseded_by_run_id AS "supersededByRunId",
             definition_name AS "definitionName",
             definition_version AS "definitionVersion",
             task_queue AS "taskQueue",
@@ -933,8 +959,9 @@ export const createWorkflowStore = (
             completed_at = now(),
             updated_at = now()
           WHERE id = $1
+            AND run_id = $3
         `,
-        [args.attemptId, nextRun.id]
+        [args.attemptId, nextRun.id, args.runId]
       )
 
       await insertEventQuery.run(
@@ -1447,6 +1474,10 @@ export const createWorkflowStore = (
           parent_run_id AS "parentRunId",
           parent_step_key AS "parentStepKey",
           continued_from_run_id AS "continuedFromRunId",
+          branched_from_run_id AS "branchedFromRunId",
+          branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+          branched_from_attempt_id AS "branchedFromAttemptId",
+          superseded_by_run_id AS "supersededByRunId",
           definition_name AS "definitionName",
           definition_version AS "definitionVersion",
           status,
@@ -1501,6 +1532,10 @@ export const createWorkflowStore = (
           parent_run_id AS "parentRunId",
           parent_step_key AS "parentStepKey",
           continued_from_run_id AS "continuedFromRunId",
+          branched_from_run_id AS "branchedFromRunId",
+          branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+          branched_from_attempt_id AS "branchedFromAttemptId",
+          superseded_by_run_id AS "supersededByRunId",
           definition_name AS "definitionName",
           definition_version AS "definitionVersion",
           status,
@@ -1632,6 +1667,10 @@ export const createWorkflowStore = (
             parent_run_id AS "parentRunId",
             parent_step_key AS "parentStepKey",
             continued_from_run_id AS "continuedFromRunId",
+            branched_from_run_id AS "branchedFromRunId",
+            branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+            branched_from_attempt_id AS "branchedFromAttemptId",
+            superseded_by_run_id AS "supersededByRunId",
             definition_name AS "definitionName",
             definition_version AS "definitionVersion",
             status,
@@ -1709,6 +1748,10 @@ export const createWorkflowStore = (
             parent_run_id AS "parentRunId",
             parent_step_key AS "parentStepKey",
             continued_from_run_id AS "continuedFromRunId",
+            branched_from_run_id AS "branchedFromRunId",
+            branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+            branched_from_attempt_id AS "branchedFromAttemptId",
+            superseded_by_run_id AS "supersededByRunId",
             definition_name AS "definitionName",
             definition_version AS "definitionVersion",
             status,
@@ -1755,6 +1798,83 @@ export const createWorkflowStore = (
   const listActiveRuns = async (limit: number) => {
     const rows = await listActiveRunsQuery.run({ limit }, db)
     return rows.map(mapRun)
+  }
+
+  const listRuns = async (args: {
+    limit: number
+    parentRunId?: string
+    search?: string
+    status?: WorkflowRunStatus
+    taskQueue?: string
+    workflowName?: string
+  }) => {
+    const rows = await listRunsQuery.run(
+      {
+        limit: args.limit,
+        parentRunId: args.parentRunId,
+        search: args.search,
+        status: args.status,
+        taskQueue: args.taskQueue,
+        workflowName: args.workflowName,
+      },
+      db
+    )
+
+    return rows.map(mapRun)
+  }
+
+  const listRunLineage = async (runId: string) => {
+    const rows = await listRunLineageQuery.run({ runId }, db)
+    return rows.flatMap((row) => {
+      if (
+        typeof row.id !== "string" ||
+        typeof row.definitionName !== "string" ||
+        typeof row.definitionVersion !== "number" ||
+        typeof row.status !== "string" ||
+        row.input === null ||
+        row.context === null ||
+        !(row.availableAt instanceof Date) ||
+        !(row.createdAt instanceof Date) ||
+        !(row.updatedAt instanceof Date)
+      ) {
+        return []
+      }
+
+      return [
+        mapRun({
+          id: row.id,
+          parentRunId: row.parentRunId,
+          parentStepKey: row.parentStepKey,
+          continuedFromRunId: row.continuedFromRunId,
+          branchedFromRunId: row.branchedFromRunId,
+          branchedFromAttemptRunId: row.branchedFromAttemptRunId,
+          branchedFromAttemptId: row.branchedFromAttemptId,
+          supersededByRunId: row.supersededByRunId,
+          definitionName: row.definitionName,
+          definitionVersion: row.definitionVersion,
+          status: row.status,
+          currentStepKey: row.currentStepKey,
+          input: row.input,
+          context: row.context,
+          result: row.result,
+          error: row.error,
+          leaseOwner: row.leaseOwner,
+          leaseExpiresAt: row.leaseExpiresAt,
+          cancelRequestedAt: row.cancelRequestedAt,
+          cancelMode: row.cancelMode,
+          availableAt: row.availableAt,
+          createdAt: row.createdAt,
+          updatedAt: row.updatedAt,
+          completedAt: row.completedAt,
+          ...(typeof row.taskQueue === "string"
+            ? { taskQueue: row.taskQueue }
+            : {}),
+          ...(typeof row.priority === "number"
+            ? { priority: row.priority }
+            : {}),
+        }),
+      ]
+    })
   }
 
   const listFailedRuns = async (limit: number) => {
@@ -2134,6 +2254,10 @@ export const createWorkflowStore = (
             parent_run_id AS "parentRunId",
             parent_step_key AS "parentStepKey",
             continued_from_run_id AS "continuedFromRunId",
+            branched_from_run_id AS "branchedFromRunId",
+            branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+            branched_from_attempt_id AS "branchedFromAttemptId",
+            superseded_by_run_id AS "supersededByRunId",
             definition_name AS "definitionName",
             definition_version AS "definitionVersion",
             status,
@@ -2275,6 +2399,10 @@ export const createWorkflowStore = (
                 parent_run_id AS "parentRunId",
                 parent_step_key AS "parentStepKey",
                 continued_from_run_id AS "continuedFromRunId",
+                branched_from_run_id AS "branchedFromRunId",
+                branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+                branched_from_attempt_id AS "branchedFromAttemptId",
+                superseded_by_run_id AS "supersededByRunId",
                 definition_name AS "definitionName",
                 definition_version AS "definitionVersion",
                 status,
@@ -2370,6 +2498,10 @@ export const createWorkflowStore = (
                   parent_run_id AS "parentRunId",
                   parent_step_key AS "parentStepKey",
                   continued_from_run_id AS "continuedFromRunId",
+                  branched_from_run_id AS "branchedFromRunId",
+                  branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+                  branched_from_attempt_id AS "branchedFromAttemptId",
+                  superseded_by_run_id AS "supersededByRunId",
                   definition_name AS "definitionName",
                   definition_version AS "definitionVersion",
                   status,
@@ -2446,6 +2578,10 @@ export const createWorkflowStore = (
                 parent_run_id AS "parentRunId",
                 parent_step_key AS "parentStepKey",
                 continued_from_run_id AS "continuedFromRunId",
+                branched_from_run_id AS "branchedFromRunId",
+                branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+                branched_from_attempt_id AS "branchedFromAttemptId",
+                superseded_by_run_id AS "supersededByRunId",
                 definition_name AS "definitionName",
                 definition_version AS "definitionVersion",
                 status,
@@ -2625,6 +2761,7 @@ export const createWorkflowStore = (
       const [nextRunRow] = await insertBranchedRunQuery.run(
         {
           branchedFromRunId: sourceRun.id,
+          branchedFromAttemptRunId: attempt.runId,
           branchedFromAttemptId: attempt.id,
           definitionName: sourceRun.definitionName,
           definitionVersion: sourceRun.definitionVersion,
@@ -2744,6 +2881,8 @@ export const createWorkflowStore = (
     ping,
     listActiveRuns,
     listFailedRuns,
+    listRunLineage,
+    listRuns,
     listSchedules,
     listStuckRuns,
     markOutboxDelivered,
