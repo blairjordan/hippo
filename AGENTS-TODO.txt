@@ -3,6 +3,43 @@ Hippo — Agent-shaped primitives roadmap
 
 Branch: feat/agent-primitives
 
+This file is the durable plan for everything we intend to land for
+agent-shaped primitives in Hippo. It carries forward across PRs — each
+PR flips its checkboxes here and updates the "Current branch state"
+section so a fresh pair of eyes (or a future Claude session) can pick
+up cold without re-reading the conversation.
+
+Current branch state
+--------------------
+Commits so far on this branch (oldest first):
+  3503a35  docs: agent-primitives roadmap + README agent angle
+           - AGENTS-TODO.txt created
+           - README.md gains "For AI Agents" section and tagline
+  302d3f4  feat(external-session): migration + type scaffolding
+           - db/migrations/20260629100000_external_sessions.sql adds
+             external_session_id + external_session_kind to
+             workflow_step_attempts and workflow_waits with partial
+             indexes WHERE NOT NULL
+           - src/types/workflow.ts adds ExternalSessionStartResult and
+             ExternalSessionStepDefinition; extends record types
+           - src/lib/workflow-store.ts: IWaitRow + mapWait plumbing
+           - src/lib/workflow-engine.test.ts: fixture updated for new
+             required wait fields
+           - npx tsc --noEmit clean
+
+Open work-in-flight on this branch (next commits):
+  - Engine dispatch branch for kind === "externalSession"
+  - store.openWait extension to persist external session columns
+  - store.getOpenWaitByExternalSessionId lookup for callback route
+  - POST /v1/external-sessions/:externalId/resume route
+  - Postgres-backed integration test
+  - examples/workflows-demo: video transcode example
+
+Once the engine + route + test + example land, PR 1 (externalSession
+MVP) is mergeable to main. After merge this branch can either be
+rebased forward for PR 2 (heartbeat callback) or PR 2 can branch off
+a fresh main — see "PR cadence" below.
+
 Why this work exists
 --------------------
 Every serious AI agent harness shipping in 2026 — coding agents,
@@ -451,3 +488,383 @@ E) retry policy on start() but not resume()?
 
 F) PR 1 ships without poll / attach / cancel?
    Decision: YES, those are PR 2/3/4. MVP is callback-driven only.
+
+----------------------------------------------------------------------
+
+Design notes: external heartbeat protocol (PR 2)
+================================================
+
+Builds on PR 1. Extends ctx.heartbeat (already exists for owner-side
+heartbeats) with an externally-driven counterpart so long-running
+external sessions can extend their lease and report progress without
+needing the worker process to tick.
+
+API
+---
+  POST /v1/external-sessions/:externalId/heartbeat
+    Authorization: Hippo callback HMAC
+    body: {
+      progress?: number      // 0..1
+      message?: string
+      usage?: {              // matches recordUsage shape (PR 4)
+        resource: string
+        amount: number
+        costUsd?: number
+      }
+    }
+
+Effects (all in one txn):
+  - workflow_runs.lease_expires_at extended by configurable grace
+    (default: matches existing lease_ms)
+  - workflow_step_attempts.last_heartbeat_at = now()
+  - workflow_events row of type "step.external_heartbeat" with body
+  - if usage provided AND PR 4 has landed, recordUsage is called
+
+Open decisions
+--------------
+A) Heartbeat resets lease vs adds fixed grace?
+   Leaning: RESETS to now + lease_ms. Matches existing semantics.
+B) Heartbeat for non-externalSession steps?
+   Leaning: NO. The internal ctx.heartbeat already covers task steps.
+   This endpoint exists specifically for the external-side caller.
+C) Rate limit?
+   Defer. Honest rate-limiting needs a separate primitive. For PR 2
+   document expected cadence (every 5–30s) and rely on operator
+   discipline.
+
+----------------------------------------------------------------------
+
+Design notes: step event streaming (PR 3)
+=========================================
+
+Generic: any step body can emit typed intermediate events that pipe
+into the existing SSE event tail. Non-blocking, fire-and-forget from
+the step body's perspective.
+
+API
+---
+  ctx.emit({ type: string, data: JsonValue }) => Promise<void>
+
+Persistence:
+  workflow_events row with event_type = "step.emit:<type>" and a
+  payload that includes { type, data, stepKey, stepAttemptId }.
+
+For externalSession steps, the callback heartbeat (PR 2) can carry
+events too:
+  POST /v1/external-sessions/:externalId/events
+    body: { events: [{ type, data }, ...] }
+  Same persistence shape.
+
+Dashboard:
+  SSE tail already streams workflow_events; add a per-step filter so
+  the run detail view shows emit events grouped under their step
+  attempt. Step kind renderers (PR 7) can render these richly.
+
+Open decisions
+--------------
+A) Event types validated by Hippo or open strings?
+   Leaning: OPEN STRINGS. Step kind renderers handle unknown types.
+B) Bulk emit (batch into one row vs row-per-event)?
+   Leaning: ROW PER EVENT for now. Partition + index already handle
+   volume. Revisit if a single step emits thousands.
+C) Retention?
+   Same retention rules as existing workflow_events. Archival is a
+   separate concern owned by the existing partitioning work.
+
+----------------------------------------------------------------------
+
+Design notes: usage ledger + budget caps (PR 4)
+===============================================
+
+Generic: any step can record metered usage. Workflow declares budgets;
+ledger sums on insert and transitions the run to a new terminal state
+when exceeded.
+
+API
+---
+  ctx.recordUsage({
+    resource: string,             // free string e.g. "tokens", "bytes"
+    amount: number,
+    costUsd?: number,
+    dimension?: string,           // optional sub-tag e.g. "input"|"output"
+  })
+
+  defineWorkflow({
+    ...,
+    budget?: {
+      [resource: string]: number  // amount cap per resource
+      costUsd?: number            // hard USD cap across all resources
+    }
+  })
+
+Storage
+-------
+New table workflow_run_usage, hash-partitioned by run_id to match the
+existing history tables:
+
+  CREATE TABLE workflow_run_usage (
+    id BIGSERIAL,
+    run_id UUID NOT NULL,
+    step_attempt_id UUID,
+    resource TEXT NOT NULL,
+    dimension TEXT,
+    amount NUMERIC NOT NULL,
+    cost_usd NUMERIC,
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (run_id, id)
+  ) PARTITION BY HASH (run_id);
+
+Plus run-level rollup column on workflow_runs:
+  ALTER TABLE workflow_runs
+    ADD COLUMN total_cost_usd NUMERIC NOT NULL DEFAULT 0;
+
+Enforcement
+-----------
+On recordUsage insert (same txn as step commit when transactional):
+  1. Insert into workflow_run_usage
+  2. Update workflow_runs.total_cost_usd += costUsd
+  3. Sum amount-per-resource for the run, compare to budget
+  4. If any cap exceeded, transition run status to "exhausted_budget"
+     (NEW terminal state — see types changes)
+
+The transition happens at the END of the step (in the same txn that
+records the usage), so a step that records usage above the cap still
+completes its work — the workflow does not progress past it.
+
+New terminal state
+------------------
+WorkflowRunStatus gains "exhausted_budget". Compensation hooks fire
+on this state like other terminal failures.
+
+Open decisions
+--------------
+A) Cap behavior: stop immediately vs let current step finish?
+   Decision: LET CURRENT STEP FINISH. Killing mid-step is destructive
+   and we already pay for the work. Workflow does not advance past it.
+B) Per-step vs per-workflow budget?
+   Leaning: PER-WORKFLOW first. Per-step is a follow-up if asked.
+C) Currency?
+   USD only in core. Other currencies are FX layer concerns.
+
+----------------------------------------------------------------------
+
+Design notes: external cancellation hooks (PR 5)
+================================================
+
+Completes the externalSession story. When Hippo cancels a step (hard
+terminate, budget exhaustion, parent run cancel), the external system
+needs to know to abort. Compensation hooks cover COMPLETED steps;
+this covers IN-FLIGHT.
+
+API
+---
+  ExternalSessionStepDefinition gains:
+    cancel?: (
+      context: StepExecutionContext,
+      externalId: string,
+      reason: "hard_terminate" | "budget" | "parent_cancel"
+    ) => Promise<void> | void
+
+Engine
+------
+On hard terminate path, before transitioning run to canceled:
+  - For each open externalSession wait on the run, call cancel()
+  - cancel() runs with a strict timeout (default 5s, configurable)
+  - cancel() failures are logged as workflow_events
+    "step.external_cancel_failed" but DO NOT block the cancel itself
+  - Wait record transitions to "canceled"
+
+Open decisions
+--------------
+A) cancel() retry?
+   Leaning: NO. Best effort, fire once, log on failure. Retries on
+   cancel paths add latency where users want fast cancellation.
+B) Should the external HTTP API expose a cancel endpoint too?
+   Decision: NO. Hippo initiates the cancel; the external system
+   reacts. If callers want symmetric "external aborts itself" they
+   call POST /v1/runs/:id/cancel from the external side.
+
+----------------------------------------------------------------------
+
+Design notes: Tier 2 and Tier 3
+================================
+Detailed design for the rest of the roadmap will be added inline
+to this file as each item is picked up. Keeping speculative design
+out of the file until then so it does not rot.
+
+Items still without inline design:
+  - 2.6 Per-run scoped key-value side channel
+  - 2.7 Step taxonomy + dashboard renderer plugin API
+  - 2.8 Retry-with-augmented-input pattern
+  - 2.9 Operator action plugin API
+  - 3.10 Compensation refinement
+  - 3.11 Run-scoped event query API
+  - 3.12 Usage ledger UI panel
+
+----------------------------------------------------------------------
+
+PR cadence
+==========
+Working model: each Tier 1 / Tier 2 item lands as its own PR to main.
+The feat/agent-primitives branch is the long-lived parent during the
+Tier 1 push, rebased forward as upstream main advances.
+
+Lifecycle per item:
+  1. Pick item from working order
+  2. Update "Current branch state" with the open work in flight
+  3. Implement (migration → types → store → engine → routes → tests
+     → example workflow → docs)
+  4. Run full test suite + npx tsc --noEmit + npm run lint
+  5. Update README "For AI Agents" if the item exposes new primitives
+     visible to agent harnesses
+  6. Open PR. PR description links to this file's design notes for
+     the item plus the open-decisions block.
+  7. On merge, flip the Tier 1/2/3 checkbox here. Move design notes
+     for landed items into a separate "Landed work" section below
+     for archival.
+
+Branch hygiene:
+  - Keep AGENTS-TODO.txt the FIRST file in every commit so it always
+    reflects current state.
+  - Never delete design notes — move them to "Landed work" archive.
+  - If a decision in this file is overruled in code review, update
+    BOTH the code and the file in the same PR.
+
+----------------------------------------------------------------------
+
+Testing strategy
+================
+
+Unit tests
+  - Pure logic in src/lib/*.test.ts using existing in-memory store
+    fixture (see workflow-engine.test.ts mock store pattern).
+  - Every new step kind must have engine-level unit tests covering:
+    happy path, retry on transient error, timeout, hard terminate.
+
+Postgres-backed integration tests
+  - Every new schema change must have an integration test that
+    exercises real Postgres (see workflow-store.pg.test.ts).
+  - For externalSession: spin up a run, simulate external callback,
+    assert wait resolves and step advances.
+  - For partitioned tables: assert partition pruning via EXPLAIN
+    (matches existing convention).
+
+Example workflows
+  - Every Tier 1 primitive ships with at least one non-agent
+    example in examples/workflows-demo/. Examples are referenced
+    from the PR description so reviewers can spin up the workflow
+    and watch it run on the dashboard.
+
+Linting / typecheck
+  - npx tsc --noEmit must be clean on the branch tip.
+  - npm run lint must be clean.
+  - No new eslint-disable lines without a comment justifying.
+
+----------------------------------------------------------------------
+
+@hippo-contrib/agents (separate repo / package)
+===============================================
+
+Out of scope for this branch BUT context for why core primitives are
+shaped the way they are. The eventual agent-specific layer:
+
+Shape:
+  @hippo-contrib/agents
+    src/
+      agent-step.ts          — wraps externalSession with agent vocab
+      hermes-adapter.ts      — calls Hermes gateway HTTP API
+      claude-sdk-adapter.ts  — calls Claude Agent SDK
+      openai-adapter.ts      — calls OpenAI Assistants API
+      critic-loop.ts         — wraps iterativeStep (Tier 2.8) for critic
+      slack-approval.ts      — wraps wait.forSignal with Slack callbacks
+      tool-allowlist.ts      — typed tool gating helpers
+      usage-helpers.ts       — token-to-cost converters per provider
+    examples/
+      generic-feature-flow.ts — full  phase model demo
+
+The contrib package does NOT live in this repo. The Hippo core team
+maintains the primitives; the contrib layer is community-extensible.
+
+What this implies for core API design:
+  - externalSession takes a free-string sessionKind, not a closed
+    enum, so contrib packages can label sessions without core
+    needing to know.
+  - ctx.recordUsage takes a free-string resource, not "tokens" enum.
+  - Step taxonomy is open (Tier 2.7) so contrib renderers register
+    without core registry changes.
+  - Operator actions are pluggable (Tier 2.9) so contrib UIs ship
+    domain-specific buttons.
+
+----------------------------------------------------------------------
+
+ integration mapping (out-of-tree, informational)
+=======================================================
+
+For reviewers wondering "how does 's  actually use
+this" — 's mapping of its phase model onto these primitives:
+
+   phase             →  Hippo primitive
+  ----------------------------------------------
+  requirements             →  externalSession + critic loop
+  architecture             →  externalSession + critic loop
+  task decomposition       →  externalSession + critic loop
+  implementation (per task)→  externalSession (one per task,
+                              child workflow per feature)
+  HITL clarification       →  wait.forSignal (Slack callback)
+  HITL PR approval         →  wait.forSignal (GitHub webhook)
+  cost cap per feature     →  workflow budget caps
+  rewind from sideways     →  existing rewind/fork API
+  multi-feature swarm      →  cron schedule + child workflows
+  live agent reasoning     →  ctx.emit + dashboard renderer
+  per-phase tool gating    →  application-level config passed to
+                              the Hermes session at start()
+  artifact state           →  git branch + frontmatter (NOT Hippo)
+  memory                   →  Mnemosyne (NOT Hippo)
+
+None of this lives in Hippo core. It is 's job to compose the
+primitives. The mapping is here so reviewers can sanity-check whether
+a proposed core change is bent toward  specifically vs serves
+the general agent-orchestration case.
+
+----------------------------------------------------------------------
+
+Glossary
+========
+
+externalSession
+  A step whose work happens outside the Hippo worker process. The
+  external system holds state behind an opaque ID; Hippo waits for
+  a callback to advance.
+
+sessionKind
+  A free-string tag on externalSession that lets dashboards render
+  the step differently and lets contrib packages address sessions
+  by category without core needing to know the type.
+
+usage ledger
+  Per-run record of metered resource consumption (tokens, bytes,
+  GPU-minutes, USD). Aggregated for budget enforcement and
+  dashboard cost panels.
+
+iterative step (planned, Tier 2.8)
+  A retry pattern where each attempt sees the previous attempt's
+  output and failure reason. The critic loop in agent workflows
+  is one consumer; constraint solvers and adaptive rate limiters
+  are others.
+
+contrib (as in @hippo-contrib/agents)
+  Out-of-tree packages that compose Hippo primitives into
+  domain-specific layers. Hippo core stays generic; contrib layers
+  carry the vocabulary of a particular domain (agents, payments,
+  ETL, etc.).
+
+----------------------------------------------------------------------
+
+Landed work (archive)
+=====================
+
+When PR 1 (externalSession MVP) merges to main, its design notes
+above will move down to this section with a "merged: <commit>" tag
+so the active design area stays focused on in-flight items.
+
+(Nothing landed yet.)
