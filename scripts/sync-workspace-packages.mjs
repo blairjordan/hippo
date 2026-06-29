@@ -12,7 +12,7 @@ const packages = [
     directory: "core",
     exportsTarget: "./dist/src/core.js",
     description: "Hippo core engine, store, tracing, and shared runtime types",
-    readmeHeading: "@hippo/core",
+    readmeHeading: "pygmyhippo-core",
     dependencies: {
       "@opentelemetry/api": rootPackageJson.dependencies["@opentelemetry/api"],
       "@pgtyped/runtime": rootPackageJson.dependencies["@pgtyped/runtime"],
@@ -38,7 +38,7 @@ const packages = [
     directory: "sdk",
     exportsTarget: "./dist/src/sdk.js",
     description: "Hippo workflow definition helpers and TypeScript-first SDK surface",
-    readmeHeading: "@hippo/sdk",
+    readmeHeading: "pygmyhippo-sdk",
     dependencies: {},
     artifacts: [
       "src/sdk",
@@ -51,7 +51,7 @@ const packages = [
     directory: "server",
     exportsTarget: "./dist/src/server.js",
     description: "Hippo Fastify app, worker loop, recovery loop, and server bootstrap helpers",
-    readmeHeading: "@hippo/server",
+    readmeHeading: "pygmyhippo-server",
     dependencies: {
       "@fastify/sensible": rootPackageJson.dependencies["@fastify/sensible"],
       fastify: rootPackageJson.dependencies.fastify,
@@ -83,7 +83,7 @@ const packages = [
     directory: "cli",
     exportsTarget: "./dist/src/cli.js",
     description: "Hippo operator command-line interface",
-    readmeHeading: "@hippo/cli",
+    readmeHeading: "pygmyhippo-cli",
     dependencies: {
       "commander": rootPackageJson.dependencies["commander"] || "^12.1.0",
       "pg": rootPackageJson.dependencies["pg"],
@@ -188,7 +188,7 @@ for (const pkg of packages) {
   }
 
   const manifest = {
-    name: `@hippo/${pkg.directory}`,
+    name: `pygmyhippo-${pkg.directory}`,
     version: rootPackageJson.version,
     private: false,
     type: "module",

@@ -1,4 +1,4 @@
-# @hippo/sdk
+# pygmyhippo-sdk
 
 Hippo workflow definition helpers and TypeScript-first SDK surface.
 

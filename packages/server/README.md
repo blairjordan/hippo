@@ -1,4 +1,4 @@
-# @hippo/server
+# pygmyhippo-server
 
 Hippo Fastify app, worker loop, recovery loop, and server bootstrap helpers.
 

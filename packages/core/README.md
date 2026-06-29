@@ -1,4 +1,4 @@
-# @hippo/core
+# pygmyhippo-core
 
 Hippo core engine, store, tracing, and shared runtime types.
 

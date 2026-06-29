@@ -1,4 +1,4 @@
-# @hippo/cli
+# pygmyhippo-cli
 
 Hippo operator command-line interface.
 
