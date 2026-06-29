@@ -1,0 +1,453 @@
+Hippo — Agent-shaped primitives roadmap
+=======================================
+
+Branch: feat/agent-primitives
+
+Why this work exists
+--------------------
+Every serious AI agent harness shipping in 2026 — coding agents,
+research agents, ops agents — is converging on the same architecture:
+deterministic state machine on the outside, agent reasoning on the
+inside. Phase transitions (requirements → architecture → tasks →
+implementation), tool-scope gating per phase, critic loops with
+bounded retries, human-in-the-loop approvals over Slack / email /
+chat, durable resume after worker crashes, token + USD budget caps.
+
+That outer layer is workflow-engine work, not agent work. Today most
+teams either bolt it on with ad-hoc scripts or pull in a heavyweight
+framework (LangGraph, Temporal) that drags in vendor abstractions
+their agent code does not actually need.
+
+Hippo is the right shape for this layer — Postgres-native, durable,
+TypeScript-first, light operationally — but it does not yet have the
+generic primitives that make agent-shaped workloads first-class.
+This roadmap closes that gap WITHOUT turning Hippo into an
+agent-only tool.
+
+Positioning rules
+-----------------
+- Hippo stays a generic Postgres durable workflow engine. NOT an
+  "agent engine". NOT Hermes-specific. NOT Claude-specific.
+- Every primitive added here must have at least one credible
+  non-agent use case (long-running ML training jobs, browser
+  automation, video transcode, batch pipelines, webhook-driven
+  async work, payment settlement). If a feature is agent-only, it
+  goes in a separate `@hippo-contrib/agents` package, not core.
+- Goal: make Hippo the best Postgres workflow engine for long-
+  running external sessions with metered usage and live event
+  streams. Agents fall out for free as one consumer of that.
+- README pitches the agent angle alongside the traditional one so
+  agent builders find Hippo, but core stays generic so non-agent
+  consumers are not forced to ignore agent vocabulary.
+
+Motivating consumer (out-of-tree)
+---------------------------------
+ at  wraps Nous Research's Hermes agent harness. 
+needs phase transitions, HITL gates via Slack, durable retries with
+critic feedback, operator rewind when an agent goes sideways, token +
+USD budgets, and live agent reasoning streamed into a dashboard. All
+of those map to generic primitives below.  proves the primitives
+on a real workload; other agent harnesses (Claude Code skills,
+OpenAI Assistants, Codex, internal harnesses at other teams) can
+build sibling contrib layers on the same engine.
+
+Design rules
+------------
+1. Core stays language-agnostic at the boundary. External sessions
+   are addressed by opaque string IDs; Hippo never imports an SDK for
+   the external system.
+2. Every primitive must compose with existing store semantics:
+   same-txn step commit, lease + recovery, rewind/fork, child runs,
+   compensation, partitioned history.
+3. No agent-specific verbs in public types. `agentStep` lives in
+   contrib; core ships `externalSession`, `usage`, `events`, etc.
+4. Every Tier 1 item must ship with: SQL migration + store method +
+   engine wiring + SDK builder + integration test + dashboard pass.
+
+----------------------------------------------------------------------
+
+Tier 1 — Required for credible "long-running external session" story
+====================================================================
+
+[ ] 1. externalSession step kind
+    Generic problem: an external system holds state for the step
+    (agent session, ML training job, browser automation context,
+    Stripe payment intent). Step must persist the external id so
+    that after worker crash/recovery we can REATTACH instead of
+    restarting the external work.
+
+    API sketch:
+      externalSession({
+        kind: "string-tag",          // free-form taxonomy, e.g. "agent", "ml-train"
+        start: async (ctx) => ({ externalId, initial }),
+        poll:  async (ctx, externalId) => ({ status, output? }),
+        attach?: async (ctx, externalId) => ({ status, output? }),
+        cancel?: async (ctx, externalId) => void,
+        timeoutMs?: number,
+      })
+
+    Persistence: new column workflow_step_attempts.external_session_id
+    (text, nullable, indexed). Plus optional external_session_meta
+    (jsonb) for kind/url/labels visible in dashboard.
+
+    Recovery: if a step attempt is recovered mid-flight and the
+    attached external_session_id is non-null, engine calls attach()
+    instead of start(). attach() defaults to poll() if not provided.
+
+    Non-agent example: video transcoder API. start() POSTs job, gets
+    transcode_id; poll() returns status; attach() resumes polling
+    after worker recovery.
+
+[ ] 2. External heartbeat protocol
+    Generic problem: step is alive but waiting on an external system;
+    lease shouldn't expire just because we haven't ticked locally.
+
+    Existing primitive (ctx.heartbeat) updates lease_expires_at and
+    last_heartbeat_at. Extend to accept inbound heartbeats from the
+    external system via signed callback:
+
+      POST /v1/steps/:attemptId/heartbeat
+        Authorization: Hippo callback HMAC
+        body: { progress?: number, message?: string, usage?: {...} }
+
+    Side effects: extend lease, append a workflow_event of kind
+    "step.heartbeat" with provided progress/message, optionally
+    record usage (see Tier 1.4).
+
+    Non-agent example: long S3 multipart upload posts progress
+    heartbeats so workers don't expire its lease.
+
+[ ] 3. Step event streaming (typed event bus)
+    Generic problem: step emits intermediate events while running.
+    Consumers (dashboards, monitoring) want a live tail without
+    waiting for step completion.
+
+    Today: workflow_events table exists, SSE infrastructure exists,
+    but step bodies have no typed channel to emit progress events
+    by step kind.
+
+    API:
+      ctx.emit({ type: "tokens", data: { delta: "..." } })
+      ctx.emit({ type: "tool-call", data: { name, args } })
+      ctx.emit({ type: "progress", data: { pct: 0.42 } })
+
+    Event types are open strings. Hippo persists them in
+    workflow_events with step_attempt_id + event_type. SSE channel
+    surfaces them live.
+
+    Non-agent example: build pipeline step emits "log-line", "test-
+    result", "artifact-uploaded" events.
+
+[ ] 4. Usage ledger + budget caps
+    Generic problem: steps consume metered resources (tokens, bytes,
+    GPU-minutes, third-party API quota). Workflow should cap total
+    consumption and dashboard should aggregate.
+
+    New table: workflow_run_usage
+      run_id uuid, step_attempt_id uuid?, resource text,
+      amount numeric, cost_usd numeric, recorded_at timestamptz
+    Hash-partitioned by run_id consistent with existing history.
+
+    API:
+      ctx.recordUsage({ resource: "tokens", amount: 1234,
+                        costUsd: 0.0089, dimension?: "input" | "output" })
+
+    Workflow declaration:
+      defineWorkflow({ ..., budget: { tokens: 2_000_000,
+                                      costUsd: 5.00 } })
+
+    Enforcement: on usage record, sum-check budgets; on exceed,
+    transition run to terminal state `exhausted_budget` (NEW). First-
+    class state, not a generic error.
+
+    Non-agent example: S3 egress costs per step; per-workflow USD cap
+    prevents runaway data export jobs.
+
+[ ] 5. External cancellation hooks
+    Generic problem: Hippo cancels a step (hard terminate or budget
+    exhaustion). External system holding the session needs to know to
+    abort its work. Compensation hooks cover COMPLETED steps; this is
+    the IN-FLIGHT case.
+
+    API: externalSession step accepts:
+      cancel: async (ctx, externalId) => void
+
+    Hard terminate path: before transitioning step state, engine
+    calls cancel() if defined. cancel() is best-effort, capped by
+    timeout, failures logged but do not block the cancel itself.
+
+    Non-agent example: cancel a long-running HTTP request to a
+    third-party API when the workflow is killed.
+
+----------------------------------------------------------------------
+
+Tier 2 — Generic ergonomics that benefit any long-running step
+==============================================================
+
+[ ] 6. Per-run scoped key-value side channel
+    Generic problem: steps need to stash small bits of state across
+    retries / phases without bloating the payload.
+
+    Today: only payload + step output exist. Payload is conceptually
+    input; output is per-attempt. Neither is the right shape for a
+    cross-step scratchpad.
+
+    New table: workflow_run_kv (run_id, key, value jsonb, updated_at).
+    API: run.kv.get(key), run.kv.set(key, value), run.kv.delete(key).
+    Scoped to the run only.
+
+    Non-agent example: stash an API access token refreshed by one
+    step, used by subsequent steps without re-fetching.
+
+[ ] 7. Step taxonomy + dashboard renderer plugin API
+    Generic problem: dashboard renders all steps with the same
+    generic UI. Different step kinds (agent, build, payment, browser
+    automation) benefit from rich per-kind renderers.
+
+    API: workflow registration includes step kind tags. Dashboard
+    accepts plugin bundles that register renderers per kind:
+      registerStepRenderer("agent", AgentPanel)
+      registerStepRenderer("payment", PaymentPanel)
+
+    Hippo ships generic renderer for unknown kinds. Renderers are
+    pure functions of step state + events; no privileged dashboard
+    access.
+
+    Non-agent example: payment step shows Stripe charge state +
+    refund button; build step shows test pass/fail timeline.
+
+[ ] 8. Retry-with-augmented-input pattern
+    Generic problem: retry where each attempt should be informed by
+    the previous attempt's output + failure reason. Today retries are
+    stateless re-calls.
+
+    API:
+      iterativeStep({
+        initial: { ... },
+        refine: (prevInput, prevOutput, error) => nextInput,
+        attempt: async (ctx, input) => output,
+        maxAttempts: 3,
+      })
+
+    Critic loop is one consumer; constraint solvers and adaptive
+    rate-limiting are others.
+
+    Non-agent example: API retry where prior 429 response headers
+    adjust the next attempt's request rate.
+
+[ ] 9. Operator action plugin API
+    Generic problem: dashboard needs custom operator actions per
+    step kind beyond cancel/retry/rewind.
+
+    API: workflow declares operator actions per step kind:
+      registerOperatorAction("agent", "inject", async (ctx, args) => ...)
+      registerOperatorAction("payment", "refund", async (ctx, args) => ...)
+
+    Hippo provides dispatch + audit log row in workflow_events with
+    kind="operator.action". Consumer provides the semantic handler.
+
+    Non-agent example: payment dispute resolution; manual override
+    on any human-in-loop step.
+
+----------------------------------------------------------------------
+
+Tier 3 — Polish
+===============
+
+[ ] 10. Compensation refinement
+     Existing compensation already covers task steps. Refine for
+     per-step-kind compensation strategies and idempotency hints.
+
+[ ] 11. Run-scoped event query API
+     Filter run events by kind / time range / step attempt. Powers
+     dashboard and external monitoring. Mostly a routes-layer concern.
+
+[ ] 12. Usage ledger UI panel
+     Cost rollups per run / workflow / day. Top consumers. Top
+     resources. Pure SQL aggregation on top of #4.
+
+----------------------------------------------------------------------
+
+Explicitly OUT of scope for Hippo core
+======================================
+These go in a separate contrib package (e.g.
+@hippo-contrib/agents), NOT Hippo core. Listed here so reviewers
+can push back if any of these creep in:
+
+- HTTP clients for any specific agent harness (Hermes, OpenAI
+  Assistants, Anthropic SDK, Claude Agent SDK)
+- Phase models (requirements → architecture → tasks → impl)
+- Artifact frontmatter schemas
+- Critic agent prompts or prompt templates
+- Tool allowlist contents (the mechanism stays in core; values do not)
+- Slack callback formatting / Slack-shaped HITL helpers
+- Memory system integrations (Mnemosyne, mem0, etc.)
+- Issue tracker integrations (Linear, Jira, etc.)
+
+----------------------------------------------------------------------
+
+Working order
+=============
+1. externalSession (Tier 1.1) — foundational; everything else attaches
+2. usage ledger + budget caps (Tier 1.4) — independent, high value
+3. step event streaming (Tier 1.3) — leans on existing SSE
+4. external cancellation (Tier 1.5) — small once 1.1 lands
+5. external heartbeat callback (Tier 1.2) — extends existing heartbeat
+6. per-run KV (Tier 2.6) — small, unblocks more interesting examples
+7. dashboard renderer plugin API (Tier 2.7) — needed before agent
+   contrib package can ship visuals
+8. iterative step (Tier 2.8)
+9. operator action plugin API (Tier 2.9)
+10. polish (Tier 3)
+
+Each item lands as a single PR back to main with:
+- migration in db/
+- store method + types
+- engine integration
+- SDK builder + re-export
+- integration test (Postgres-backed)
+- example workflow in examples/workflows-demo demonstrating a
+  non-agent use case
+- AGENTS.md update if public API surface changes
+
+After each PR, this file gets its checkbox flipped and any open
+follow-ups noted in-place.
+
+----------------------------------------------------------------------
+
+Design notes: externalSession MVP (PR 1)
+========================================
+
+Scope kept tight so first PR lands and reviews. Polling, attach(),
+cancellation propagation, and budget integration all land in
+follow-up PRs.
+
+MVP step kind shape
+-------------------
+  type ExternalSessionStartResult = {
+    externalId: string         // opaque to Hippo
+    payload?: JsonValue        // optional initial state stored on wait
+  }
+
+  type ExternalSessionStepDefinition = {
+    kind: "externalSession"
+    label?: string
+    sessionKind: string        // free-form tag e.g. "agent", "ml-job"
+    next?: string
+    transitions?: Record<string, string>
+    timeoutMs: number          // hard deadline for the whole session
+    retry?: RetryPolicy        // applied to start() failures only
+    start: (ctx) => Promise<ExternalSessionStartResult>
+    resume: (ctx, externalId, payload?) => Promise<WaitStepResumeResult>
+  }
+
+Engine flow
+-----------
+1. Step starts: call start(ctx) — gets { externalId, payload? }.
+2. Engine opens a wait record with:
+     correlationKey       = `ext:${sessionKind}:${externalId}`
+     externalSessionId    = externalId
+     externalSessionKind  = sessionKind
+     expiresAt            = now + timeoutMs
+3. Step transitions to waiting; same lifecycle as existing wait.
+4. External system completes work, POSTs callback (route below).
+5. Engine resolves wait by externalSessionId (or correlationKey),
+   calls resume(ctx, externalId, payload).
+6. Result transitions step like any other.
+
+Storage
+-------
+Reuse wait infrastructure rather than build a parallel table. New
+columns:
+
+  ALTER TABLE workflow_step_attempts
+    ADD COLUMN external_session_id text,
+    ADD COLUMN external_session_kind text;
+
+  ALTER TABLE workflow_waits
+    ADD COLUMN external_session_id text,
+    ADD COLUMN external_session_kind text;
+
+  CREATE INDEX workflow_waits_external_session_idx
+    ON workflow_waits (external_session_id)
+    WHERE external_session_id IS NOT NULL;
+
+  CREATE INDEX workflow_step_attempts_external_session_idx
+    ON workflow_step_attempts (external_session_id)
+    WHERE external_session_id IS NOT NULL;
+
+Callback route
+--------------
+  POST /v1/external-sessions/:externalId/resume
+    Authorization: Hippo callback HMAC (reuses verifyCallbackRequest)
+    body: { payload?: JsonValue }
+
+  Lookup: workflow_waits WHERE external_session_id = :externalId
+          AND status = 'open'. If found, dispatch to existing
+          resumeWait engine path; otherwise 404.
+
+  Convenience: correlationKey route still works
+  (POST /v1/waits/:correlationKey/resume) for callers that prefer
+  to compute the key themselves.
+
+Recovery semantics (MVP)
+------------------------
+Step lives inside a wait. Existing wait recovery covers the
+"worker died between start() and openWait()" case via lease
+expiry. The interesting REATTACH semantics (call attach() on
+recovery with persisted externalId) land in PR 2.
+
+For the MVP, recovery behavior is: if start() succeeded and the
+wait is open, the step is "safe" — it will resume on callback or
+expire on timeout. If start() failed mid-flight (external work
+might have been kicked off but we didn't persist the id), retry
+policy on start() applies; the external system either ignores the
+duplicate kickoff or returns an idempotency-keyed existing id.
+Callers handle externalSession start() idempotency themselves for
+PR 1 (documented).
+
+Example workflow (non-agent)
+----------------------------
+examples/workflows-demo/src/workflows/video-transcode.ts
+
+  Step 1: queueTranscode (externalSession)
+    sessionKind: "video-transcode"
+    start: POST to fake transcoder service → { externalId }
+    resume: validate transcode output, store result url in patch
+
+  Step 2: notifyDone (task)
+    output url logged
+
+  Demonstrates: long-running external work, callback-driven
+  resumption, no agent concept anywhere.
+
+Open decisions (need sign-off before code)
+-------------------------------------------
+A) Reuse wait table vs new external_sessions table
+   Decision: REUSE. Less duplication, recovery / cleanup paths
+   already exist. Trade: schema knows externalSession kind exists.
+   Acceptable — wait table already knows about signal kind.
+
+B) sessionKind tag — free string or enum?
+   Decision: FREE STRING. Open by design; closing it would force
+   contrib packages to register kinds with core. Dashboard renders
+   unknown kinds as generic.
+
+C) Callback auth — HMAC only or token?
+   Decision: HMAC. Reuse existing callback authenticator. Token
+   auth on the start side (via app api token) is fine because
+   start is initiated by Hippo itself; the callback is the
+   externally-driven path that needs HMAC.
+
+D) timeoutMs required?
+   Decision: YES, required. Matches wait/signal. Prevents zombie
+   external sessions. Long-running consumers pick a high number;
+   making it optional is a footgun.
+
+E) retry policy on start() but not resume()?
+   Decision: YES. start() is the side-effect to the external
+   system; resume() is internal book-keeping. resume() errors
+   should fail the step attempt, not silently retry.
+
+F) PR 1 ships without poll / attach / cancel?
+   Decision: YES, those are PR 2/3/4. MVP is callback-driven only.

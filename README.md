@@ -1,8 +1,10 @@
 # 🦛 Hippo
 
-Postgres-native durable workflow engine.
+Postgres-native durable workflow engine. Built for traditional application workflows AND for AI agent state machines.
 
 Hippo runs long-lived workflows with Postgres as the only durable state layer: leased workers, retries, waits, signals, schedules, child workflows, transactional step commits, and recovery after worker failure.
+
+> **For AI agents:** every serious agent harness — coding agents, research agents, ops agents — eventually needs a durable state machine to drive phase transitions, gate human approvals, retry with critic feedback, track token + USD budgets, and survive worker crashes mid-run. Hippo gives you that without forcing your agent code into a vendor framework. See [For AI Agents](#for-ai-agents) below.
 
 ## Why Hippo
 
@@ -27,6 +29,39 @@ Hippo is strongest when you need:
 - transactional workflow steps that touch your domain tables and workflow state together
 
 Hippo is not trying to optimize for polyglot workers or extreme fan-out first. It is optimized for small and mid-scale TypeScript systems that want durable orchestration with simple operations.
+
+## For AI Agents
+
+Agent orchestration is converging on a known shape: deterministic state machine on the outside, agent reasoning on the inside. Phase gates (requirements → architecture → tasks → implementation), tool-scope restrictions per phase, critic loops with bounded retries, human-in-the-loop approvals, durable resume after crashes. None of that is agent-specific work — it is **workflow engine work**.
+
+Hippo is built to be the engine underneath that pattern, without becoming a vendor agent framework. The engine stays generic and the agent layer is a thin contrib package on top.
+
+What Hippo gives an agent harness today:
+
+- **Durable phase transitions.** Each phase of an agent workflow is a step. Step state lives in Postgres. Worker crash mid-run resumes at the last completed step, not from scratch.
+- **Human-in-the-loop via signals + waits.** Pause an agent workflow on a Slack approval, Linear comment, or any external callback. Workflow blocks for hours or days without burning a process. Wait expiry is first-class so workflows never hang forever.
+- **Critic loops with retry policies.** Per-step retry policy with exponential backoff and non-retryable error tags. Compose with iterative refinement so each retry can see the previous attempt's output and critic feedback.
+- **Operator rewind and fork.** When an agent goes sideways at phase 3 of 7, rewind to phase 1 with the original context snapshot. Branch into an alternate plan without losing the original run.
+- **Live observability.** Mermaid render of the workflow, SSE event tail, clickable step inspection. See exactly which phase the agent is in and what it has produced.
+- **Same-transaction step commit.** Commit workflow progress and your application writes (Linear ticket state, artifact records, audit rows) together in one Postgres transaction.
+- **Cron schedules + child workflows.** Autonomous agents that poll an issue tracker, fan out per ticket, and coordinate across multiple in-flight features.
+
+Hippo intentionally does NOT ship:
+
+- An HTTP client for any specific agent harness (Claude Agent SDK, OpenAI Assistants, Hermes, etc.)
+- A phase model — phases are application code, not engine state
+- Prompt templates, critic prompts, or tool allowlists — those live in your agent layer
+- Memory system integrations — agents bring their own memory
+
+The agent-specific glue lives in a separate `@hippo-contrib/agents` package (in development on `feat/agent-primitives`) so the core engine stays usable for any long-running external workload — ML training jobs, video transcode pipelines, payment workflows, browser automation — without dragging in agent vocabulary.
+
+If you are building an agent harness and reaching for LangGraph, Temporal, or Trigger.dev, Hippo is worth looking at:
+
+- LangGraph is a graph DSL inside Python; Hippo is a runtime that lives next to your harness in any language.
+- Temporal is a heavyweight durable execution engine with strict determinism rules; Hippo is a Postgres workflow engine you already know how to operate.
+- Trigger.dev is a TypeScript task platform with Postgres + Redis + 5 containers; Hippo is one Postgres and one worker.
+
+See `AGENTS-TODO.txt` on the `feat/agent-primitives` branch for the in-flight roadmap of agent-shaped generic primitives (long-running external sessions with reattach, token + USD budgets, streamed step events, external cancellation hooks, per-run scratchpads).
 
 ## Features
 
