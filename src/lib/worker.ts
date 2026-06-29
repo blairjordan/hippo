@@ -16,11 +16,16 @@ export const startWorkerLoop = (args: {
   let inFlight = false
   let timer: ReturnType<typeof setTimeout> | null = null
   let inFlightPromise: Promise<void> | null = null
+  let wakeRequested = false
   let stopListeningPromise: Promise<(() => Promise<void>) | null> =
     Promise.resolve(null)
 
   const schedule = (delayMs = args.pollIntervalMs) => {
     if (!active) {
+      return
+    }
+
+    if (timer) {
       return
     }
 
@@ -40,12 +45,17 @@ export const startWorkerLoop = (args: {
       timer = null
     }
 
+    if (inFlight) {
+      wakeRequested = true
+      return
+    }
+
     void tick()
   }
 
   const tick = async () => {
     if (!active || inFlight) {
-      schedule()
+      wakeRequested = active
       return
     }
 
@@ -68,7 +78,13 @@ export const startWorkerLoop = (args: {
       } finally {
         inFlight = false
         inFlightPromise = null
-        schedule()
+
+        if (wakeRequested) {
+          wakeRequested = false
+          void tick()
+        } else {
+          schedule()
+        }
       }
     })()
 

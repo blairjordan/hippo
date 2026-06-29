@@ -1,10 +1,10 @@
 Hippo local roadmap
 
 Positioning
-- Not "Temporal lite". Pitch is "Trigger.dev DX, your own Postgres, no SaaS, no cluster."
-- Hippo wins on setup simplicity + local/staging/prod parity + Postgres-native moat (same-txn step commit, outbox, LISTEN/NOTIFY).
-- Hippo loses on polyglot, replay debugging, and massive horizontal fan-out — and that is fine for the sweet spot (small/mid-scale TS shops that already run Postgres).
-- Honest parity claim: hippo abstracts retries, queues, state machines, and timers. Rollbacks require saga primitive (Wave 0) before claim holds.
+- Hippo is a Postgres-native durable workflow orchestrator for teams building long-running TypeScript workflow and agent harnesses.
+- The product bet is setup simplicity, local/staging/prod parity, and Postgres-native durability primitives: same-txn step commit, outbox, LISTEN/NOTIFY, operator history, and run-scoped KV.
+- The README should target people who want orchestration under an agent harness without splitting "core workflows" and "agent workflows" into separate product concepts.
+- Keep external comparison language out of the README. Use concrete Hippo capabilities and quickstart proof instead.
 
 Resolved product decisions
 - Postgres is the only supported backend. SQLite is out of scope.
@@ -18,13 +18,20 @@ Next up (ordered, work top-down)
 1. Query/operator surfaces                                         — richer run listing, search, and admin workflow
 2. OTel spans + deeper observability                               — production diagnostics
 3. Time-travel rewind/fork                                         — major operator unlock
-4. Partition workflow_step_attempts + workflow_events by hash(run_id) — irreversible, do once schema settles
-5. Tier 1 SDK monorepo split + publish                             — local public entrypoints exist; publishable packaging still remains
-6. Hot-reload workflow registration in dev                         — tighten local DX loop
-7. Examples directory with realistic workflows                     — prove the primitives on real flows
-8. CLI ergonomics                                                  — operator CLI parity with dashboard
+4. Tier 1 SDK monorepo split + publish                             — local public entrypoints exist; publishable packaging still remains
+5. Examples directory with realistic workflows                     — prove the primitives on real flows
+6. CLI ergonomics                                                  — operator CLI parity with dashboard
+7. Architecture cleanup                                            — split oversized store/route/test files to match repo rules
+8. Test hardening                                                  — CLI command coverage, scaffold smoke, and worker-loop edge cases
 
-Wave 0 — Temporal parity claim (small, unblock honest marketing)
+Critical code debt
+- [ ] Split oversized handwritten TypeScript files to satisfy `.codex/rules/clean-architecture.md`.
+  Current offenders: `src/lib/workflow-store.ts`, `src/routes/workflows.ts`, `src/lib/workflow-engine.test.ts`, and `src/lib/workflow-store.pg.test.ts`.
+  Target split: store concerns into focused modules, route registration vs handlers/views, and long integration tests into feature suites.
+- [ ] Add scaffold smoke coverage that runs generated app checks against the real generated files.
+  Cover: package scripts, env defaults, workflow import path, dashboard start command, and generated README commands.
+
+Wave 0 — Baseline durability claims
 - [x] Exponential backoff + jitter + max delay cap
   Extend RetryPolicy: { maxAttempts, initialBackoffMs, maxBackoffMs, backoffMultiplier, jitterMs }. Replace getRetryAvailableAt linear formula with exponential + capped + jittered. Default policy preset.
 - [x] Saga / compensate primitive
@@ -93,11 +100,11 @@ Tier 3 — differentiation
   Current state: typed workflow definitions exist.
   Open: Zod-validated step inputs and outputs.
 
-Tier 3.5 — Temporal feature gaps worth filling (lower priority than DX/Wave-0)
+Tier 3.5 — Advanced orchestration primitives (lower priority than DX/Wave-0)
 - [ ] Workflow Updates (synchronous query-with-mutation)
-  Temporal "Update" semantics: client sends request that mutates state and waits for result. Hippo could implement as a signal variant with response channel (insert request, worker processes, response row, client polls or LISTEN/NOTIFY).
+  Client sends a request that mutates state and waits for result. Hippo could implement this as a signal variant with response channel (insert request, worker processes, response row, client polls or LISTEN/NOTIFY).
 - [ ] Search attributes
-  Optional JSONB `search_attributes` column on workflow_runs + GIN index. Operator search by `attrs @> '{"customerId":"..."}'`. No separate Elasticsearch needed (Temporal's killer dependency).
+  Optional JSONB `search_attributes` column on workflow_runs + GIN index. Operator search by `attrs @> '{"customerId":"..."}'`.
 - [ ] Side effects helper
   Only needed if Path B replay (deterministic generator workflows) lands. Today hippo's step model already records non-deterministic values via step output.
 - [ ] Nexus / cross-namespace operations
@@ -166,8 +173,7 @@ Tier 4 — SDK + packaging (PROMOTED — DX is the pitch, not features)
 - [ ] Tier 2 SDK: remote worker protocol (deferred decision)
   Enables polyglot workers (Go, Python). Requires task_queues + pending_step_invocations tables, HTTP poll/complete endpoints, lease over HTTP. Conflicts with same-txn step commit moat — do not commit until polyglot demand is concrete.
 
-Tier 5 — DX parity with Trigger.dev (this is the actual pitch)
-  Driver feedback: "Temporal too complicated to set up. Trigger.dev easier, better local/staging/prod handling."
+Tier 5 — Productized local/staging/prod DX
   Goal: 5 minutes from `git clone` to seeing a workflow execute. Same config working locally, staging, prod with no rewrites.
   Primary actions to actually earn the simplicity claim:
     1. Collapse the public mental model toward one primary authoring primitive.
@@ -187,7 +193,7 @@ Tier 5 — DX parity with Trigger.dev (this is the actual pitch)
   Creates: docker-compose.yml (Postgres + hippo container), .env with safe defaults, src/workflows/example.ts, package.json scripts, README. One command, working demo.
 - [x] `hippo dev` — single command starts everything
   Spawns Postgres via docker-compose (if not running), runs migrations, starts hippo server + worker with hot-reload of workflows (tsx watch). Logs colored, structured.
-- [~] Web dashboard (Trigger.dev's killer feature)
+- [~] Web dashboard
   Current state: embedded `/dashboard` route with active/failed run lists, workflow definition Mermaid views, run detail page, and live event tail.
   Embedded route /dashboard. Server-rendered (Fastify + minimal React or vanilla HTMX) — no separate frontend service. Views:
     - Run list with filter by workflow / status / search attrs
@@ -206,8 +212,9 @@ Tier 5 — DX parity with Trigger.dev (this is the actual pitch)
   Open: validate the env matrix from a freshly scaffolded app and keep deploy docs aligned as process-model changes land.
 - [x] Realtime run status streaming (SSE)
   GET /v1/runs/:runId/stream → SSE of events as they happen. Use LISTEN/NOTIFY on workflow_events insert. Both dashboard and client SDK consume.
-- [ ] Hot-reload workflow registration in dev
-  When src/workflows/*.ts changes, re-register definitions without restart. Worker picks up new version on next claim. Pin running runs to their original version (already done via definition_version).
+- [~] Hot-reload workflow registration in dev
+  Current state: `startWorkflowDevReloader` watches workflow files in the source dev entrypoint, reloads changed definitions, and `replaceDefinitions` preserves pinned versions for in-flight runs while exposing the newest version for new starts.
+  Open: wire the same reload behavior into packaged `hippo server` / `hippo worker` flows when `HIPPO_ENV=dev`.
 - [ ] Examples directory with realistic workflows
   - Webhook ingestion + retry + dead-letter
   - Order fulfillment with saga compensation
@@ -220,8 +227,9 @@ Tier 5 — DX parity with Trigger.dev (this is the actual pitch)
 - [~] README quickstart < 5 minutes
   Current state: top-level README now describes the truthful source-repo flow (`npm run hippo:init -- my-app`), dashboard entrypoint, and example run command.
   Open: switch the docs to `npx hippo init my-app` once the CLI is packaged and published.
-- [ ] CLI ergonomics
-  `hippo runs ls`, `hippo runs show <id>`, `hippo runs cancel <id>`, `hippo workflows ls`, `hippo workflows render <name>` — operator CLI parity with dashboard, scriptable.
+- [~] CLI ergonomics
+  Current state: `hippo migrate`, `hippo render`, `hippo worker`, `hippo server`, `hippo runs ls`, `hippo runs show <id>`, `hippo runs cancel <id>`, `hippo workflows ls`, and `hippo workflows render <name>` exist.
+  Open: JSON/scriptable output mode, terminate/retry/rewind/fork commands, schedule commands, and packaging validation for `npx hippo`.
 
 Cross-cutting acceptance for Tier 5
   - New user goes from zero to a running workflow visible in dashboard in under 5 minutes on a fresh machine with only Docker installed.

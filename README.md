@@ -218,7 +218,7 @@ import { createHippoTracer, createWorkflowEngine, createWorkflowStore } from "hi
 import { createApp, startWorkerLoop } from "hippo/server"
 ```
 
-These entrypoints are verified locally through the package `exports` map today. The package is not published yet, so the source-repo workflow remains the supported install path.
+These entrypoints are verified locally through the package `exports` map today.
 
 Workspace package previews:
 
