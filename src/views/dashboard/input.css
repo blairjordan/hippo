@@ -471,21 +471,6 @@
     .content { padding: 1rem; }
   }
 
-  .mermaidTooltip {
-    position: absolute;
-    text-align: center;
-    z-index: 100;
-    background-color: hsl(var(--popover)) !important;
-    color: hsl(var(--foreground)) !important;
-    border: 1px solid hsl(var(--border)) !important;
-    border-radius: calc(var(--radius) - 2px) !important;
-    padding: 6px 10px !important;
-    font-family: inherit !important;
-    font-size: 0.75rem !important;
-    box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1) !important;
-    opacity: 1 !important;
-  }
-
   .theme-toggle-sun { display: none; }
   .theme-toggle-moon { display: block; }
 
@@ -509,4 +494,26 @@
     border-color: hsl(var(--accent-foreground));
   }
 }
+
+.mermaidTooltip {
+  position: absolute !important;
+  text-align: center !important;
+  z-index: 9999 !important;
+  background-color: #1e293b !important; /* dark slate background */
+  color: #f8fafc !important; /* light slate text */
+  border: 1px solid #475569 !important; /* slate border */
+  border-radius: 4px !important;
+  padding: 6px 10px !important;
+  font-family: ui-sans-serif, system-ui, sans-serif !important;
+  font-size: 0.75rem !important;
+  box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1) !important;
+  opacity: 1 !important;
+}
+
+:root:not(.dark) .mermaidTooltip {
+  background-color: #ffffff !important; /* white background for light mode */
+  color: #0f172a !important; /* dark text for light mode */
+  border: 1px solid #cbd5e1 !important; /* light border */
+}
+
 
