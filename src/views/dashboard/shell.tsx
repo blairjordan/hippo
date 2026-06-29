@@ -186,6 +186,20 @@ export const renderShellDocument = (args: {
           }
         })
 
+        document.addEventListener("click", (event) => {
+          const btn = event.target.closest("[data-tab-trigger]")
+          if (!btn) return
+          const tabId = btn.dataset.tabTrigger
+          const card = btn.closest(".card")
+          if (!card) return
+          
+          card.querySelectorAll("[data-tab-trigger]").forEach(el => el.classList.toggle("active", el === btn))
+          card.querySelectorAll(".tab-pane").forEach(pane => {
+            const isTarget = pane.id === "pane-" + tabId
+            pane.classList.toggle("hidden", !isTarget)
+          })
+        })
+
         document.addEventListener("keydown", (event) => {
           if (event.key !== "Enter") return
           const target = event.target

@@ -83,7 +83,16 @@ export const renderDefinitionDetailDocument = (args: {
         <p class="card-description">Click a step to jump to its filtered run list.</p>
       </div>
       <div class="card-content">
-        <div class="workflow-diagram">${diagramHtml}</div>
+        <nav class="tabs-nav">
+          <button type="button" class="tab-btn active" data-tab-trigger="diagram">Diagram</button>
+          <button type="button" class="tab-btn" data-tab-trigger="source">Source</button>
+        </nav>
+        <div id="pane-diagram" class="tab-pane">
+          <div class="workflow-diagram">${diagramHtml}</div>
+        </div>
+        <div id="pane-source" class="tab-pane hidden">
+          <pre style="margin: 0; max-height: 400px; overflow: auto; background: hsl(var(--muted) / 0.3); border: 1px solid hsl(var(--border)); padding: 1rem; border-radius: calc(var(--radius) - 2px); font-family: ui-monospace, monospace; font-size: 0.75rem;">${escapeHtml(args.mermaid)}</pre>
+        </div>
       </div>
     </article>
     <article class="card">

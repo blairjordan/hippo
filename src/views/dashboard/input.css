@@ -493,6 +493,39 @@
     background-color: hsl(var(--accent));
     border-color: hsl(var(--accent-foreground));
   }
+
+  /* Tabs Layout */
+  .tabs-nav {
+    display: flex;
+    border-bottom: 1px solid hsl(var(--border));
+    margin-bottom: 1rem;
+    gap: 1rem;
+  }
+  .tab-btn {
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: hsl(var(--muted-foreground));
+    font-size: 0.875rem;
+    font-weight: 500;
+    padding: 0.5rem 0.25rem;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+    font-family: inherit;
+  }
+  .tab-btn:hover {
+    color: hsl(var(--foreground));
+  }
+  .tab-btn.active {
+    color: hsl(var(--foreground));
+    border-bottom-color: hsl(var(--ring));
+  }
+  .tab-pane {
+    display: block;
+  }
+  .tab-pane.hidden {
+    display: none;
+  }
 }
 
 .mermaidTooltip {
