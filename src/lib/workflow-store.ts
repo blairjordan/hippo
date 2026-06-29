@@ -1402,6 +1402,8 @@ export const createWorkflowStore = (
     statuses?: WorkflowRunStatus[]
     workflowName?: string
     search?: string
+    parentRunId?: string
+    taskQueue?: string
     afterUpdatedAt?: Date
     afterId?: string
   }) => {
@@ -1425,6 +1427,16 @@ export const createWorkflowStore = (
       conditions.push(
         `(id::text ILIKE ${search} OR definition_name ILIKE ${search} OR COALESCE(current_step_key, '') ILIKE ${search})`
       )
+    }
+
+    if (args.parentRunId) {
+      values.push(args.parentRunId)
+      conditions.push(`parent_run_id = ${placeholder()}::uuid`)
+    }
+
+    if (args.taskQueue) {
+      values.push(args.taskQueue)
+      conditions.push(`task_queue = ${placeholder()}::text`)
     }
 
     if (args.afterUpdatedAt && args.afterId) {

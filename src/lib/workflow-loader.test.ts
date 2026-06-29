@@ -1,4 +1,5 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdirSync } from "node:fs"
 import path from "node:path"
 import { tmpdir } from "node:os"
 import { pathToFileURL } from "node:url"
@@ -127,5 +128,52 @@ describe("workflow loader", () => {
     await new Promise((resolve) => setTimeout(resolve, 20))
 
     expect(replaceDefinitionsCalls).toHaveLength(1)
+  })
+
+  it("uses the dev reloader symlink copy strategy when HIPPO_ENV is dev", async () => {
+    // Setup a temp workspace
+    const tempDir = await mkdtemp(path.join(tmpdir(), "hippo-dev-loader-workspace-"))
+    tempDirectories.push(tempDir)
+
+    // Create folders
+    const workflowsDir = path.join(tempDir, "workflows")
+    mkdirSync(workflowsDir, { recursive: true })
+
+    // Create sibling directory and file
+    const siblingDir = path.join(tempDir, "lib")
+    mkdirSync(siblingDir, { recursive: true })
+    const siblingFile = path.join(siblingDir, "def.mjs")
+    await writeFile(siblingFile, "export const value = 'lib-ok'", "utf8")
+
+    // Create workflow file importing from sibling
+    const workflowFile = path.join(workflowsDir, "index.mjs")
+    await writeFile(workflowFile, `
+      import { value } from "../lib/def.mjs"
+      export const workflows = [
+        {
+          name: "dev-workflow",
+          version: 1,
+          startAt: "done",
+          steps: {
+            done: { kind: "end", label: value }
+          }
+        }
+      ]
+    `, "utf8")
+
+    const moduleUrl = pathToFileURL(workflowFile)
+
+    // Set env to dev
+    const originalEnv = process.env.HIPPO_ENV
+    process.env.HIPPO_ENV = "dev"
+
+    try {
+      const definitions = await loadWorkflowDefinitions(moduleUrl)
+      expect(definitions).toHaveLength(1)
+      expect(definitions[0]?.name).toBe("dev-workflow")
+      expect(definitions[0]?.steps["done"]?.label).toBe("lib-ok")
+    } finally {
+      process.env.HIPPO_ENV = originalEnv
+    }
   })
 })

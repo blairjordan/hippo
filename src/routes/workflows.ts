@@ -89,6 +89,8 @@ const operatorRunsQuerySchema = z.object({
     .optional(),
   taskQueue: optionalQueryText,
   workflowName: optionalQueryText,
+  afterUpdatedAt: z.string().optional(),
+  afterId: z.uuid().optional(),
 })
 
 const stuckRunsQuerySchema = z.object({
@@ -614,21 +616,35 @@ export const createWorkflowRoutes = (args: {
       },
       run: async () => {
         const query = operatorRunsQuerySchema.parse(request.query)
+        const limit = query.limit
+        const runs = await args.store.listRunsPaginated({
+          limit: limit + 1,
+          ...(query.status === undefined ? {} : { statuses: [query.status] }),
+          ...(query.workflowName === undefined ? {} : { workflowName: query.workflowName }),
+          ...(query.search === undefined ? {} : { search: query.search }),
+          ...(query.parentRunId === undefined ? {} : { parentRunId: query.parentRunId }),
+          ...(query.taskQueue === undefined ? {} : { taskQueue: query.taskQueue }),
+          ...(query.afterUpdatedAt && query.afterId
+            ? {
+                afterUpdatedAt: new Date(query.afterUpdatedAt),
+                afterId: query.afterId,
+              }
+            : {}),
+        })
+
+        const hasMore = runs.length > limit
+        const pageRuns = hasMore ? runs.slice(0, limit) : runs
+        const lastRun = pageRuns.at(-1)
+
         return {
-          runs: await args.store.listRuns({
-            limit: query.limit,
-            ...(query.parentRunId === undefined
-              ? {}
-              : { parentRunId: query.parentRunId }),
-            ...(query.search === undefined ? {} : { search: query.search }),
-            ...(query.status === undefined ? {} : { status: query.status }),
-            ...(query.taskQueue === undefined
-              ? {}
-              : { taskQueue: query.taskQueue }),
-            ...(query.workflowName === undefined
-              ? {}
-              : { workflowName: query.workflowName }),
-          }),
+          runs: pageRuns,
+          nextCursor:
+            hasMore && lastRun
+              ? {
+                  afterUpdatedAt: lastRun.updatedAt.toISOString(),
+                  afterId: lastRun.id,
+                }
+              : null,
         }
       },
     })
@@ -1165,6 +1181,67 @@ export const createWorkflowRoutes = (args: {
           runId: run.id,
           workflowName: run.definitionName,
           context: projectRunContext(run.context, keys),
+        }
+      },
+    })
+  })
+
+  app.get("/v1/runs/:runId/query/:queryName", async (request) => {
+    return traceAuthedRequest({
+      app,
+      auth: args.auth,
+      request,
+      tracer: args.tracer,
+      trace: {
+        name: "hippo.http.query_run",
+        attributes: createRouteTraceAttributes({
+          method: request.method,
+          operation: "http.query_run",
+          route: "/v1/runs/:runId/query/:queryName",
+        }),
+      },
+      run: async () => {
+        const params = z
+          .object({
+            runId: z.uuid(),
+            queryName: z.string().min(1),
+          })
+          .parse(request.params)
+
+        const run = await getExistingRun(app, args.store, params.runId)
+        const workflow = args.engine
+          .listWorkflows()
+          .find(
+            (candidate) =>
+              candidate.name === run.definitionName &&
+              candidate.version === run.definitionVersion
+          )
+
+        if (!workflow) {
+          throw app.httpErrors.notFound(
+            `Workflow "${run.definitionName}" (v${run.definitionVersion}) not found`
+          )
+        }
+
+        const queryFn = workflow.queries?.[params.queryName]
+        if (!queryFn) {
+          throw app.httpErrors.notFound(
+            `Query "${params.queryName}" not defined on workflow "${run.definitionName}"`
+          )
+        }
+
+        try {
+          const result = queryFn(run.context)
+          return {
+            runId: run.id,
+            workflowName: run.definitionName,
+            queryName: params.queryName,
+            result,
+          }
+        } catch (error) {
+          throw app.httpErrors.badRequest(
+            `Failed to execute query "${params.queryName}": ${error instanceof Error ? error.message : String(error)}`
+          )
         }
       },
     })

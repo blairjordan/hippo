@@ -283,4 +283,5 @@ export type WorkflowDefinition = {
   title?: string
   startAt: string
   steps: Record<string, WorkflowStepDefinition>
+  queries?: Record<string, (context: JsonObject) => JsonValue>
 }

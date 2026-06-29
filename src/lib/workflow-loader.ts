@@ -1,4 +1,5 @@
-import { watch } from "node:fs"
+import { watch, cpSync, symlinkSync, mkdirSync, readdirSync, rmSync } from "node:fs"
+import { randomUUID } from "node:crypto"
 import path from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
@@ -23,11 +24,61 @@ const asWorkflowDefinitions = (value: unknown, modulePath: URL) => {
   return value as WorkflowDefinition[]
 }
 
-export const loadWorkflowDefinitions = async (modulePath: URL) => {
-  const nextUrl = new URL(modulePath)
-  nextUrl.searchParams.set("t", String(Date.now()))
-  const module = (await import(nextUrl.href)) as WorkflowModule
+const tempDirsToCleanup = new Set<string>()
 
+export const loadWorkflowDefinitions = async (modulePath: URL) => {
+  const isDev = process.env.HIPPO_ENV === "dev"
+
+  if (!isDev) {
+    const nextUrl = new URL(modulePath)
+    nextUrl.searchParams.set("t", String(Date.now()))
+    const module = (await import(nextUrl.href)) as WorkflowModule
+    return asWorkflowDefinitions(module.workflows, modulePath)
+  }
+
+  // Cleanup old reload directories
+  for (const oldDir of tempDirsToCleanup) {
+    try {
+      rmSync(oldDir, { recursive: true, force: true })
+      tempDirsToCleanup.delete(oldDir)
+    } catch {
+      // ignore
+    }
+  }
+
+  const filePath = fileURLToPath(modulePath)
+  const workflowsDir = path.dirname(filePath)
+  const parentDir = path.dirname(workflowsDir)
+  const workflowsDirName = path.basename(workflowsDir)
+  const fileName = path.basename(filePath)
+
+  const reloadDir = path.join(parentDir, `.reload-${randomUUID()}`)
+  mkdirSync(reloadDir, { recursive: true })
+  tempDirsToCleanup.add(reloadDir)
+
+  const entries = readdirSync(parentDir, { withFileTypes: true })
+  for (const entry of entries) {
+    if (entry.name.startsWith(".reload-")) {
+      continue
+    }
+
+    const srcPath = path.join(parentDir, entry.name)
+    const destPath = path.join(reloadDir, entry.name)
+
+    if (entry.name === workflowsDirName) {
+      cpSync(srcPath, destPath, { recursive: true })
+    } else {
+      const type = entry.isDirectory() ? "dir" : "file"
+      const symlinkType = process.platform === "win32" && type === "dir" ? "junction" : type
+      symlinkSync(srcPath, destPath, symlinkType)
+    }
+  }
+
+  const tempModulePath = path.join(reloadDir, workflowsDirName, fileName)
+  const tempModuleUrl = pathToFileURL(tempModulePath)
+  tempModuleUrl.searchParams.set("t", String(Date.now()))
+
+  const module = (await import(tempModuleUrl.href)) as WorkflowModule
   return asWorkflowDefinitions(module.workflows, modulePath)
 }
 
@@ -114,6 +165,15 @@ export const startWorkflowDevReloader = async (args: {
     }
 
     watcher.close()
+
+    for (const oldDir of tempDirsToCleanup) {
+      try {
+        rmSync(oldDir, { recursive: true, force: true })
+        tempDirsToCleanup.delete(oldDir)
+      } catch {
+        // ignore
+      }
+    }
   }
 }
 

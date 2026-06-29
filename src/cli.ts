@@ -255,4 +255,218 @@ program
     }
   })
 
+// Bootstrap store helper for CLI operations
+const bootstrapStore = async () => {
+  const config = getConfig()
+  const sql = createDatabase(config)
+  const tracer = createHippoTracer()
+  const store = createWorkflowStore(sql, { tracer })
+  return { sql, store }
+}
+
+// Command Group: runs
+const runsCmd = program
+  .command("runs")
+  .description("Manage and query workflow runs")
+
+runsCmd
+  .command("list")
+  .alias("ls")
+  .description("List workflow runs with optional filters")
+  .option("--limit <number>", "Maximum number of runs to list", "50")
+  .option("--status <status>", "Filter runs by status")
+  .option("--workflow <name>", "Filter runs by workflow name")
+  .option("--search <query>", "Search query for run ID, definition name or step key")
+  .action(async (options) => {
+    try {
+      const { sql, store } = await bootstrapStore()
+      const runs = await store.listRunsPaginated({
+        limit: parseInt(options.limit, 10),
+        ...(options.status ? { statuses: [options.status] } : {}),
+        ...(options.workflow ? { workflowName: options.workflow } : {}),
+        ...(options.search ? { search: options.search } : {}),
+      })
+
+      if (runs.length === 0) {
+        console.log("No runs found.")
+      } else {
+        console.log(
+          "RUN ID".padEnd(36) + " | " +
+          "WORKFLOW".padEnd(20) + " | " +
+          "STATUS".padEnd(10) + " | " +
+          "CURRENT STEP".padEnd(20) + " | " +
+          "UPDATED AT"
+        )
+        console.log("-".repeat(105))
+        for (const run of runs) {
+          console.log(
+            run.id + " | " +
+            (run.definitionName || "").padEnd(20).slice(0, 20) + " | " +
+            run.status.padEnd(10) + " | " +
+            (run.currentStepKey || "done").padEnd(20).slice(0, 20) + " | " +
+            run.updatedAt.toLocaleString()
+          )
+        }
+      }
+      await sql.end()
+    } catch (error) {
+      console.error("Failed to list runs:", error)
+      process.exit(1)
+    }
+  })
+
+runsCmd
+  .command("show <runId>")
+  .description("Inspect a specific workflow run in detail")
+  .action(async (runId) => {
+    try {
+      const { sql, store } = await bootstrapStore()
+      const run = await store.getRun(runId)
+      if (!run) {
+        console.error(`Error: Run "${runId}" not found.`)
+        await sql.end()
+        process.exit(1)
+      }
+
+      console.log(`Run Details:`)
+      console.log(`  ID:                 ${run.id}`)
+      console.log(`  Workflow:           ${run.definitionName} (v${run.definitionVersion})`)
+      console.log(`  Status:             ${run.status}`)
+      console.log(`  Task Queue:         ${run.taskQueue}`)
+      console.log(`  Priority:           ${run.priority}`)
+      console.log(`  Current Step:       ${run.currentStepKey ?? "Completed"}`)
+      console.log(`  Lease Owner:        ${run.leaseOwner ?? "None"}`)
+      console.log(`  Lease Expires:      ${run.leaseExpiresAt ? run.leaseExpiresAt.toLocaleString() : "N/A"}`)
+      console.log(`  Available At:       ${run.availableAt.toLocaleString()}`)
+      console.log(`  Created At:         ${run.createdAt.toLocaleString()}`)
+      console.log(`  Updated At:         ${run.updatedAt.toLocaleString()}`)
+      if (run.completedAt) {
+        console.log(`  Completed At:       ${run.completedAt.toLocaleString()}`)
+      }
+      if (run.parentRunId) {
+        console.log(`  Parent Run ID:      ${run.parentRunId} (Step: ${run.parentStepKey})`)
+      }
+      if (run.traceContext) {
+        console.log(`  Trace Context:      ${run.traceContext}`)
+      }
+
+      console.log(`\nInput:`)
+      console.log(JSON.stringify(run.input, null, 2))
+
+      console.log(`\nContext:`)
+      console.log(JSON.stringify(run.context, null, 2))
+
+      if (run.result) {
+        console.log(`\nResult:`)
+        console.log(JSON.stringify(run.result, null, 2))
+      }
+
+      if (run.error) {
+        console.log(`\nError:`)
+        console.log(JSON.stringify(run.error, null, 2))
+      }
+
+      const attempts = await store.getRunAttempts(runId)
+      if (attempts.length > 0) {
+        console.log(`\nStep Attempts:`)
+        console.log(
+          "  STEP".padEnd(25) + " | " +
+          "KIND".padEnd(12) + " | " +
+          "ATTEMPT".padEnd(8) + " | " +
+          "STATUS".padEnd(10) + " | " +
+          "COMPLETED AT"
+        )
+        console.log("  " + "-".repeat(70))
+        for (const att of attempts) {
+          console.log(
+            "  " + (att.stepKey || "").padEnd(23).slice(0, 23) + " | " +
+            att.kind.padEnd(10) + " | " +
+            String(att.attempt).padEnd(6) + " | " +
+            att.status.padEnd(8) + " | " +
+            (att.completedAt ? att.completedAt.toLocaleString() : "in-progress")
+          )
+        }
+      }
+
+      await sql.end()
+    } catch (error) {
+      console.error("Failed to inspect run:", error)
+      process.exit(1)
+    }
+  })
+
+runsCmd
+  .command("cancel <runId>")
+  .description("Request cancellation of a workflow run")
+  .option("--mode <mode>", "Cancel mode: graceful or hard", "graceful")
+  .action(async (runId, options) => {
+    try {
+      const { sql, store } = await bootstrapStore()
+      const run = await store.getRun(runId)
+      if (!run) {
+        console.error(`Error: Run "${runId}" not found.`)
+        await sql.end()
+        process.exit(1)
+      }
+
+      const mode = options.mode === "hard" ? "hard" : "graceful"
+      await store.requestCancelRun({ runId, mode })
+      console.log(`Cancellation request ('${mode}') submitted for run ${runId}.`)
+      await sql.end()
+    } catch (error) {
+      console.error("Failed to cancel run:", error)
+      process.exit(1)
+    }
+  })
+
+// Command Group: workflows
+const workflowsCmd = program
+  .command("workflows")
+  .description("Query and render workflows")
+
+workflowsCmd
+  .command("list")
+  .alias("ls")
+  .description("List all loaded workflow definitions")
+  .option("--workflows <path>", "Path to the workflows index file", "./dist/src/workflows/index.js")
+  .action(async (options) => {
+    try {
+      const workflowsPath = path.resolve(process.cwd(), options.workflows)
+      const moduleUrl = pathToFileURL(workflowsPath)
+      const definitions = await loadWorkflowDefinitions(moduleUrl)
+      if (definitions.length === 0) {
+        console.log("No workflows registered.")
+      } else {
+        console.log("Registered Workflows:")
+        for (const def of definitions) {
+          console.log(`- ${def.name} (version: ${def.version})${def.title ? `: ${def.title}` : ""}`)
+        }
+      }
+    } catch (error) {
+      console.error("Failed to list workflows:", error)
+      process.exit(1)
+    }
+  })
+
+workflowsCmd
+  .command("render <workflowName>")
+  .description("Render a workflow definition as Mermaid diagram")
+  .option("--workflows <path>", "Path to the workflows index file", "./dist/src/workflows/index.js")
+  .action(async (workflowName, options) => {
+    const workflowsPath = path.resolve(process.cwd(), options.workflows)
+    const moduleUrl = pathToFileURL(workflowsPath)
+    try {
+      const definitions = await loadWorkflowDefinitions(moduleUrl)
+      const definition = definitions.find((d) => d.name === workflowName)
+      if (!definition) {
+        console.error(`Error: Workflow "${workflowName}" not found in ${workflowsPath}`)
+        process.exit(1)
+      }
+      console.log(renderWorkflowAsMermaid(definition))
+    } catch (error) {
+      console.error("Failed to render workflow:", error)
+      process.exit(1)
+    }
+  })
+
 program.parse(process.argv)

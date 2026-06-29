@@ -11,6 +11,7 @@ import { createHippoTracer } from "./lib/tracing.js"
 import { createRecordingTracer } from "./lib/tracing.test-helpers.js"
 import { createWorkflowEngine } from "./lib/workflow-engine.js"
 import { demoWorkflow } from "./workflows/demo.js"
+import { defineWorkflow, taskStep, endStep } from "./lib/workflow-definition.js"
 import type { JsonObject } from "./types/json.js"
 import type {
   WorkflowEventRecord,
@@ -500,25 +501,27 @@ describe("app routes", () => {
   })
 
   it("lists operator runs with filters", async () => {
-    let capturedQuery:
-      | {
-          limit: number
-          parentRunId?: string
-          search?: string
-          status?: WorkflowRunRecord["status"]
-          taskQueue?: string
-          workflowName?: string
-        }
-      | null = null
+    let capturedQuery: {
+      limit: number
+      statuses?: WorkflowRunRecord["status"][]
+      workflowName?: string
+      search?: string
+      parentRunId?: string
+      taskQueue?: string
+      afterUpdatedAt?: Date
+      afterId?: string
+    } | null = null
     const store = {
       ...createStoreStub(),
-      async listRuns(args: {
+      async listRunsPaginated(args: {
         limit: number
-        parentRunId?: string
-        search?: string
-        status?: WorkflowRunRecord["status"]
-        taskQueue?: string
+        statuses?: WorkflowRunRecord["status"][]
         workflowName?: string
+        search?: string
+        parentRunId?: string
+        taskQueue?: string
+        afterUpdatedAt?: Date
+        afterId?: string
       }) {
         capturedQuery = args
         return [createRunRecord({ id: "run-filtered", status: "running" })]
@@ -545,10 +548,10 @@ describe("app routes", () => {
       runs: [{ id: "run-filtered", status: "running" }],
     })
     expect(capturedQuery).toEqual({
-      limit: 10,
+      limit: 11,
       parentRunId: "11111111-1111-4111-8111-111111111111",
       search: "run",
-      status: "running",
+      statuses: ["running"],
       taskQueue: "priority",
       workflowName: "demo-delivery",
     })
@@ -969,5 +972,71 @@ describe("app routes", () => {
     })
 
     await forkApp.close()
+  })
+
+  it("executes workflow-owned query projections", async () => {
+    const queryWorkflow = defineWorkflow({
+      name: "queryable-workflow",
+      version: 1,
+      startAt: "first",
+      steps: {
+        first: taskStep({
+          kind: "task",
+          run: () => ({}),
+          next: "end",
+        }),
+        end: endStep(),
+      },
+      queries: {
+        getCustomerId: (context) => context.customerId || "anonymous",
+      },
+    })
+
+    const run = createRunRecord({
+      id: "11111111-1111-4111-8111-222222222222",
+      definitionName: "queryable-workflow",
+      definitionVersion: 1,
+      context: { customerId: "cust-123" },
+    })
+
+    const store = {
+      ...createStoreStub(),
+      async getRun() {
+        return run
+      },
+    }
+
+    const appInstance = createApp({
+      auth: createAuth(),
+      engine: createWorkflowEngine({
+        definitions: [queryWorkflow],
+        metrics: createMetrics(),
+        store,
+      }),
+      metrics: createMetrics(),
+      store,
+    })
+
+    const response = await appInstance.inject({
+      method: "GET",
+      url: `/v1/runs/${run.id}/query/getCustomerId`,
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toEqual({
+      runId: run.id,
+      workflowName: run.definitionName,
+      queryName: "getCustomerId",
+      result: "cust-123",
+    })
+
+    // Query non-existent projection
+    const badQueryResponse = await appInstance.inject({
+      method: "GET",
+      url: `/v1/runs/${run.id}/query/unknownQuery`,
+    })
+    expect(badQueryResponse.statusCode).toBe(404)
+
+    await appInstance.close()
   })
 })
