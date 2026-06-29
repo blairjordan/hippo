@@ -1,3 +1,4 @@
+import { h } from "./jsx-runtime.js"
 import type {
   WorkflowEventRecord,
   WorkflowRunRecord,
@@ -74,14 +75,16 @@ export const renderRunsTableRow = (
   >
 ) => {
   const href = dashboardRunPath(run.id)
-  return `<tr data-href="${escapeHtml(href)}" tabindex="0">
-  <td><a class="run-link" href="${href}">${escapeHtml(run.definitionName)}</a></td>
-  <td><span class="badge ${statusToneByRun[run.status]}">${escapeHtml(run.status)}</span></td>
-  <td>${escapeHtml(run.currentStepKey ?? "—")}</td>
-  <td class="mono">${escapeHtml(run.id)}</td>
-  <td class="mono">${escapeHtml(formatDateTime(run.createdAt))}</td>
-  <td class="mono">${escapeHtml(formatDateTime(run.updatedAt))}</td>
-</tr>`
+  return (
+    <tr data-href={href} tabindex="0">
+      <td><a class="run-link" href={href}>{run.definitionName}</a></td>
+      <td><span class={`badge ${statusToneByRun[run.status]}`}>{run.status}</span></td>
+      <td>{run.currentStepKey ?? "—"}</td>
+      <td class="mono">{run.id}</td>
+      <td class="mono">{formatDateTime(run.createdAt)}</td>
+      <td class="mono">{formatDateTime(run.updatedAt)}</td>
+    </tr>
+  )
 }
 
 export const renderRunsIndexDocument = (args: {
@@ -119,7 +122,7 @@ export const renderRunsIndexDocument = (args: {
   ].join("")
 
   const tableBody = runs.length > 0
-    ? runs.map(renderRunsTableRow).join("")
+    ? runs.map(r => String(renderRunsTableRow(r))).join("")
     : `<tr><td colspan="6" class="empty">No runs match the current filter.</td></tr>`
 
   const loadMoreHref = nextCursor
@@ -361,6 +364,10 @@ export const renderRunDetailDocument = (args: {
         line-height: 1.25rem;
       }`
 
+  const statusTone = args.run?.status && args.run.status in statusToneByRun
+    ? statusToneByRun[args.run.status as keyof typeof statusToneByRun]
+    : "tone-canceled"
+
   const content = `
     <div class="page-bar">
       <div>
@@ -368,11 +375,7 @@ export const renderRunDetailDocument = (args: {
         <p>Live event tail powered by <code>GET /v1/runs/:runId/stream</code>.</p>
         <div class="meta meta-id">${escapeHtml(args.run?.id ?? "")}</div>
       </div>
-      <span class="badge ${
-        args.run?.status && args.run.status in statusToneByRun
-          ? statusToneByRun[args.run.status as keyof typeof statusToneByRun]
-          : "tone-canceled"
-      }">${escapeHtml(args.run?.status ?? "missing")}</span>
+      <span class="badge ${statusTone}">${escapeHtml(args.run?.status ?? "missing")}</span>
     </div>
     <section class="grid">
       <article class="card">
@@ -519,33 +522,52 @@ export const renderAttemptCard = (
 ) => {
   const showActions = (attempt.kind === "forward" || attempt.kind === undefined) && !isSourceRunSuperseded
 
-  return `<article class="entry" data-step-key="${escapeHtml(attempt.stepKey)}" data-step-attempt-index="${String(index)}">
-  <div class="entry-header">
-    <strong>${escapeHtml(attempt.stepKey)} · ${escapeHtml(attempt.kind === "compensate" ? "compensate" : "attempt")} ${String(attempt.attempt)}</strong>
-    ${showActions ? `
-      <div class="entry-actions">
-        <button class="btn btn-outline btn-xs" onclick="triggerBranch('${runId}', '${attempt.id}', 'rewind')">Rewind</button>
-        <button class="btn btn-outline btn-xs" onclick="triggerBranch('${runId}', '${attempt.id}', 'fork')">Fork</button>
+  const actionBlock = showActions ? (
+    <div class="entry-actions">
+      <button class="btn btn-outline btn-xs" onclick={`triggerBranch('${runId}', '${attempt.id}', 'rewind')`}>Rewind</button>
+      <button class="btn btn-outline btn-xs" onclick={`triggerBranch('${runId}', '${attempt.id}', 'fork')`}>Fork</button>
+    </div>
+  ) : null
+
+  const attemptCardHtml = (
+    <article class="entry" data-step-key={attempt.stepKey} data-step-attempt-index={String(index)}>
+      <div class="entry-header">
+        <strong>{attempt.stepKey} · {attempt.kind === "compensate" ? "compensate" : "attempt"} {String(attempt.attempt)}</strong>
+        {actionBlock}
       </div>
-    ` : ""}
-  </div>
-  <time>${escapeHtml(formatDateTime(attempt.startedAt))} → ${escapeHtml(formatDateTime(attempt.completedAt))}</time>
-  <pre class="pre-json">${formatJson({
+      <time>{formatDateTime(attempt.startedAt)} → {formatDateTime(attempt.completedAt)}</time>
+      <pre class="pre-json" unsafe-json-content-placeholder-do-not-remove-or-change="true">
+        {/* Placeholder for JSON string */}
+      </pre>
+    </article>
+  )
+
+  const jsonStr = formatJson({
     kind: attempt.kind ?? "forward",
     status: attempt.status,
     output: attempt.output,
     error: attempt.error,
-  })}</pre>
-</article>`
+  })
+
+  return String(attemptCardHtml).replace('unsafe-json-content-placeholder-do-not-remove-or-change="true">', ">" + jsonStr)
 }
 
 export const renderEventCard = (
   event: Pick<WorkflowEventRecord, "createdAt" | "eventType" | "payload">
-) => `<article class="entry">
-  <strong>${escapeHtml(event.eventType)}</strong>
-  <time>${escapeHtml(formatDateTime(event.createdAt))}</time>
-  <pre class="pre-json">${formatJson(event.payload)}</pre>
-</article>`
+) => {
+  const cardHtml = (
+    <article class="entry">
+      <strong>{event.eventType}</strong>
+      <time>{formatDateTime(event.createdAt)}</time>
+      <pre class="pre-json" unsafe-json-content-placeholder-do-not-remove-or-change="true">
+        {/* Placeholder */}
+      </pre>
+    </article>
+  )
+
+  const jsonStr = formatJson(event.payload)
+  return String(cardHtml).replace('unsafe-json-content-placeholder-do-not-remove-or-change="true">', ">" + jsonStr)
+}
 
 export const renderUsageCard = (
   usage: Pick<
@@ -557,17 +579,27 @@ export const renderUsageCard = (
     | "resource"
     | "stepAttemptId"
   >
-) => `<article class="entry">
-  <strong>${escapeHtml(usage.resource)} · ${escapeHtml(String(usage.amount))}</strong>
-  <time>${escapeHtml(formatDateTime(usage.recordedAt))}</time>
-  <pre class="pre-json">${formatJson({
+) => {
+  const cardHtml = (
+    <article class="entry">
+      <strong>{usage.resource} · {String(usage.amount)}</strong>
+      <time>{formatDateTime(usage.recordedAt)}</time>
+      <pre class="pre-json" unsafe-json-content-placeholder-do-not-remove-or-change="true">
+        {/* Placeholder */}
+      </pre>
+    </article>
+  )
+
+  const jsonStr = formatJson({
     resource: usage.resource,
     amount: usage.amount,
     costUsd: usage.costUsd,
     dimension: usage.dimension,
     stepAttemptId: usage.stepAttemptId,
-  })}</pre>
-</article>`
+  })
+
+  return String(cardHtml).replace('unsafe-json-content-placeholder-do-not-remove-or-change="true">', ">" + jsonStr)
+}
 
 export const renderLineageRunCard = (
   run: Pick<
@@ -582,10 +614,18 @@ export const renderLineageRunCard = (
     | "branchedFromRunId"
     | "supersededByRunId"
   >
-) => `<article class="entry">
-  <strong><a class="run-title" href="${dashboardRunPath(run.id)}">${escapeHtml(run.definitionName)}</a></strong>
-  <time>${escapeHtml(formatDateTime(run.createdAt))}</time>
-  <pre class="pre-json">${formatJson({
+) => {
+  const cardHtml = (
+    <article class="entry">
+      <strong><a class="run-title" href={dashboardRunPath(run.id)}>{run.definitionName}</a></strong>
+      <time>{formatDateTime(run.createdAt)}</time>
+      <pre class="pre-json" unsafe-json-content-placeholder-do-not-remove-or-change="true">
+        {/* Placeholder */}
+      </pre>
+    </article>
+  )
+
+  const jsonStr = formatJson({
     id: run.id,
     status: run.status,
     currentStepKey: run.currentStepKey,
@@ -593,5 +633,7 @@ export const renderLineageRunCard = (
     continuedFromRunId: run.continuedFromRunId,
     branchedFromRunId: run.branchedFromRunId,
     supersededByRunId: run.supersededByRunId,
-  })}</pre>
-</article>`
+  })
+
+  return String(cardHtml).replace('unsafe-json-content-placeholder-do-not-remove-or-change="true">', ">" + jsonStr)
+}

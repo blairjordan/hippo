@@ -1,3 +1,4 @@
+import { h } from "./jsx-runtime.js"
 import { escapeHtml } from "./shell.js"
 
 let mermaidMountCounter = 0
@@ -24,8 +25,9 @@ export const renderMermaidMount = (
   })
   const enriched = `${graph}\n${clickLines.join("\n")}`
 
-  return `<div class="mermaid" data-mount-id="${escapeHtml(mountId)}" data-graph="${escapeHtml(enriched)}"></div>
-<script>(window.__hippoMermaidActions=window.__hippoMermaidActions||{})[${JSON.stringify(mountId)}]=${JSON.stringify(nodeActions)};</script>`
+  return (
+    <div class="mermaid" data-mount-id={mountId} data-graph={enriched}></div>
+  )
 }
 
 export const renderMermaidBootstrap = () => `<script type="module">
@@ -169,4 +171,8 @@ export const renderMermaidBootstrap = () => `<script type="module">
     applyTheme(nextTheme)
     await renderMermaids()
   })
+</script>
+<script>
+  // Add a click registry object for the actions used in window.hippoMermaidActivate
+  window.__hippoMermaidActions = window.__hippoMermaidActions || {};
 </script>`

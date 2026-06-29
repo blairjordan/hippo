@@ -1,3 +1,5 @@
+import { readFile } from "fs/promises"
+import { fileURLToPath } from "url"
 import type {
   FastifyInstance,
   FastifyPluginAsync,
@@ -372,6 +374,16 @@ export const createWorkflowRoutes = (args: {
   store: WorkflowStore
   tracer: HippoTracer
 }): FastifyPluginAsync => async (app) => {
+  app.get("/dashboard.css", async (request, reply) => {
+    try {
+      const filePath = fileURLToPath(new URL("../views/dashboard/styles.css", import.meta.url))
+      const css = await readFile(filePath, "utf-8")
+      reply.type("text/css").send(css)
+    } catch {
+      reply.type("text/css").send("/* styles.css not compiled yet */")
+    }
+  })
+
   app.get("/dashboard", async (request, reply) => {
     await requireApiAuth(app, request, args.auth, args.tracer)
     reply.redirect("/dashboard/runs", 302)

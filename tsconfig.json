@@ -16,10 +16,14 @@
     "sourceMap": true,
     "types": [
       "node"
-    ]
+    ],
+    "jsx": "react",
+    "jsxFactory": "h",
+    "jsxFragmentFactory": "Fragment"
   },
   "include": [
     "src/**/*.ts",
+    "src/**/*.tsx",
     "scripts/**/*.ts"
   ]
 }

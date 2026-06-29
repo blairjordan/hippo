@@ -24,8 +24,9 @@
     "hippo:dev": "tsx scripts/hippo-dev.ts",
     "hippo:init": "node ./bin/hippo.js init",
     "start": "node dist/index.js",
-    "build": "node scripts/generate-migrations.mjs && tsc -p tsconfig.json && node scripts/sync-workspace-packages.mjs",
+    "build": "node scripts/generate-migrations.mjs && npm run build:css && tsc -p tsconfig.json && node scripts/sync-workspace-packages.mjs",
     "build:packages": "node scripts/sync-workspace-packages.mjs",
+    "build:css": "tailwindcss -i src/views/dashboard/input.css -o dist/src/views/dashboard/styles.css",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint .",
     "test": "vitest run",
@@ -58,6 +59,7 @@
     "@typescript-eslint/parser": "8.42.0",
     "dbmate": "2.29.0",
     "eslint": "9.35.0",
+    "tailwindcss": "^3.4.17",
     "tsx": "4.20.3",
     "typescript": "5.9.2",
     "vitest": "3.2.4"

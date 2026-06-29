@@ -1,3 +1,4 @@
+import { h } from "./jsx-runtime.js"
 import type {
   WorkflowDefinition,
   WorkflowRunRecord,
@@ -10,18 +11,23 @@ import { getWorkflowMermaidNodeIds } from "../../lib/workflow-definition.js"
 export const renderDefinitionsIndexDocument = (args: {
   workflows: { name: string; title?: string; stepCount: number }[]
 }) => {
-  const cards = args.workflows
+  const cardsHtml = args.workflows
     .map(
-      (workflow) => `<article class="card">
-      <div class="card-header">
-        <h3 class="card-title">${escapeHtml(workflow.title ?? workflow.name)}</h3>
-        <p class="card-description">${escapeHtml(workflow.name)} · ${String(workflow.stepCount)} steps</p>
-      </div>
-      <div class="card-content row">
-        <a class="link-action" href="/dashboard/definitions/${encodeURIComponent(workflow.name)}">Open definition →</a>
-        <a class="link-action" href="/v1/workflows/${encodeURIComponent(workflow.name)}/render">Source</a>
-      </div>
-    </article>`
+      (workflow) => {
+        const card = (
+          <article class="card">
+            <div class="card-header">
+              <h3 class="card-title">{workflow.title ?? workflow.name}</h3>
+              <p class="card-description">{workflow.name} · {String(workflow.stepCount)} steps</p>
+            </div>
+            <div class="card-content row">
+              <a class="link-action" href={`/dashboard/definitions/${encodeURIComponent(workflow.name)}`}>Open definition →</a>
+              <a class="link-action" href={`/v1/workflows/${encodeURIComponent(workflow.name)}/render`}>Source</a>
+            </div>
+          </article>
+        )
+        return String(card)
+      }
     )
     .join("")
 
@@ -33,7 +39,7 @@ export const renderDefinitionsIndexDocument = (args: {
       </div>
     </div>
     <div class="stat-grid">${
-      cards || '<div class="empty">No workflows are registered.</div>'
+      cardsHtml || '<div class="empty">No workflows are registered.</div>'
     }</div>
   `
 
@@ -54,13 +60,16 @@ export const renderDefinitionDetailDocument = (args: {
   runs: WorkflowRunRecord[]
 }) => {
   const tableBody = args.runs.length > 0
-    ? args.runs.map(renderRunsTableRow).join("")
+    ? args.runs.map(r => String(renderRunsTableRow(r))).join("")
     : `<tr><td colspan="6" class="empty">No runs for this definition yet.</td></tr>`
+
+  const workflowTitle = args.workflow.title ?? args.workflow.name
+  const diagramHtml = renderMermaidMount(args.mermaid, args.nodeActions)
 
   const content = `
     <div class="page-bar">
       <div>
-        <h1>${escapeHtml(args.workflow.title ?? args.workflow.name)}</h1>
+        <h1>${escapeHtml(workflowTitle)}</h1>
         <p>${escapeHtml(args.workflow.name)}</p>
       </div>
       <div class="row">
@@ -74,7 +83,7 @@ export const renderDefinitionDetailDocument = (args: {
         <p class="card-description">Click a step to jump to its filtered run list.</p>
       </div>
       <div class="card-content">
-        <div class="workflow-diagram">${renderMermaidMount(args.mermaid, args.nodeActions)}</div>
+        <div class="workflow-diagram">${diagramHtml}</div>
       </div>
     </article>
     <article class="card">
