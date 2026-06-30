@@ -6,12 +6,13 @@ import {
   createCallbackAuthenticator,
   signCallbackBody,
 } from "./lib/auth.js"
+import { signHumanTaskToken } from "./lib/engine/human-task.js"
 import { createMetrics } from "./lib/metrics.js"
 import { createHippoTracer } from "./lib/tracing.js"
 import { createRecordingTracer } from "./lib/tracing.test-helpers.js"
 import { createWorkflowEngine } from "./lib/workflow-engine.js"
 import { demoWorkflow } from "./workflows/demo.js"
-import { defineWorkflow, taskStep, endStep } from "./lib/workflow-definition.js"
+import { defineWorkflow, humanTask, taskStep, endStep } from "./lib/workflow-definition.js"
 import type { JsonObject, JsonValue } from "./types/json.js"
 import type {
   WorkflowEventRecord,
@@ -154,6 +155,9 @@ const createStoreStub = (healthy: boolean | Error = true) => ({
   async listChildRuns() {
     return []
   },
+  async listStepWaits() {
+    return []
+  },
   async listFailedRuns() {
     return []
   },
@@ -182,6 +186,9 @@ const createStoreStub = (healthy: boolean | Error = true) => ({
     return createRunRecord({ status: "compensation_failed" })
   },
   async openWait() {
+    throw new Error("not used")
+  },
+  async openFanOutWaits() {
     throw new Error("not used")
   },
   async ping() {
@@ -259,6 +266,8 @@ const createStoreStub = (healthy: boolean | Error = true) => ({
     priority: number
     input: JsonObject
     currentStepKey: string
+    idempotencyKey?: string | null
+    traceContext?: string | null
   }) {
     return createRunRecord({
       parentRunId: args.parentRunId ?? null,
@@ -929,6 +938,185 @@ describe("app routes", () => {
     await securedApp.close()
   })
 
+  it("rejects invalid human task tokens", async () => {
+    const appInstance = createApp({
+      auth: createAuth({ callbackSecret: "human-secret" }),
+      callbackSecret: "human-secret",
+      callbackToleranceSeconds: 300,
+      engine: createWorkflowEngine({
+        definitions: [demoWorkflow],
+        metrics: createMetrics(),
+        store: createStoreStub(),
+      }),
+      metrics: createMetrics(),
+      store: createStoreStub(),
+    })
+
+    const response = await appInstance.inject({
+      method: "POST",
+      url: "/v1/human-tasks/not-a-real-token",
+      payload: {
+        decision: "approve",
+      },
+    })
+
+    expect(response.statusCode).toBe(401)
+
+    await appInstance.close()
+  })
+
+  it("consumes a human task token only once", async () => {
+    const workflow = defineWorkflow({
+      name: "human-task-route",
+      version: 1,
+      startAt: "review",
+      steps: {
+        review: humanTask({
+          next: "done",
+          timeoutMs: 60_000,
+          open: () => ({
+            prompt: {
+              reviewer: "alice",
+            },
+          }),
+          resume: (_context, decision) => ({
+            patch: {
+              decision: decision.decision,
+            },
+          }),
+          timeout: {
+            transition: "timed-out",
+          },
+          transitions: {
+            timeout: "timed-out",
+          },
+        }),
+        "timed-out": endStep(),
+        done: endStep(),
+      },
+    })
+    let resumeCount = 0
+    let open = true
+    const routeStore = {
+      ...createStoreStub(),
+      async resumeWait(args: {
+        correlationKey: string
+        payload: JsonValue | undefined
+        resume: (
+          run: WorkflowRunRecord,
+          wait: {
+            id: string
+            runId: string
+            stepKey: string
+            correlationKey: string
+            status: "open" | "resumed"
+            payload: JsonValue | null
+            resumePayload: JsonValue | null
+            resumeOutput: JsonValue | null
+            expiresAt: Date | null
+            createdAt: Date
+            updatedAt: Date
+            resumedAt: Date | null
+            externalSessionId: null
+            externalSessionKind: null
+          }
+        ) => Promise<{
+          nextStepKey: string
+          context: JsonObject
+          output: JsonValue | null
+        }>
+      }) {
+        const run = createRunRecord({
+          id: "run-human-1",
+          definitionName: workflow.name,
+          definitionVersion: workflow.version,
+          status: open ? "waiting" : "queued",
+          currentStepKey: "review",
+        })
+
+        if (!open) {
+          return {
+            status: "duplicate" as const,
+            run,
+          }
+        }
+
+        open = false
+        resumeCount += 1
+        const resumed = await args.resume(run, {
+          id: "wait-1",
+          runId: run.id,
+          stepKey: "review",
+          correlationKey: args.correlationKey,
+          status: "open",
+          payload: null,
+          resumePayload: args.payload ?? null,
+          resumeOutput: null,
+          expiresAt: new Date(Date.now() + 60_000),
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          resumedAt: null,
+          externalSessionId: null,
+          externalSessionKind: null,
+        })
+
+        return {
+          status: "resumed" as const,
+          run: createRunRecord({
+            id: run.id,
+            definitionName: workflow.name,
+            definitionVersion: workflow.version,
+            status: "queued",
+            currentStepKey: resumed.nextStepKey,
+            context: resumed.context,
+          }),
+        }
+      },
+    }
+    const appInstance = createApp({
+      auth: createAuth({ callbackSecret: "human-secret" }),
+      callbackSecret: "human-secret",
+      callbackToleranceSeconds: 300,
+      engine: createWorkflowEngine({
+        definitions: [workflow],
+        metrics: createMetrics(),
+        store: routeStore,
+      }),
+      metrics: createMetrics(),
+      store: routeStore,
+    })
+    const token = signHumanTaskToken({
+      correlationKey: "human:run-human-1:review",
+      expiresAt: new Date(Date.now() + 60_000),
+      secret: "human-secret",
+    })
+
+    const first = await appInstance.inject({
+      method: "POST",
+      url: `/v1/human-tasks/${token}`,
+      payload: {
+        decision: "approve",
+      },
+    })
+    const second = await appInstance.inject({
+      method: "POST",
+      url: `/v1/human-tasks/${token}`,
+      payload: {
+        decision: "approve",
+      },
+    })
+
+    expect(first.statusCode).toBe(202)
+    expect(second.statusCode).toBe(200)
+    expect(second.json()).toMatchObject({
+      outcome: "duplicate",
+      runId: "run-human-1",
+    })
+    expect(resumeCount).toBe(1)
+
+    await appInstance.close()
+  })
+
   it("forwards an idempotency key when creating a run", async () => {
     let capturedIdempotencyKey: string | undefined
     const store = {
@@ -1098,6 +1286,9 @@ describe("app routes", () => {
         return []
       },
       async resumeWait() {
+        throw new Error("not used")
+      },
+      async resumeHumanTask() {
         throw new Error("not used")
       },
       async resumeExternalSession() {

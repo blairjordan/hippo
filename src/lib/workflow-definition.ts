@@ -2,8 +2,10 @@ import type { z } from "zod"
 import type { JsonValue } from "../types/json.js"
 import type {
   ChildStepDefinition,
+  FanOutStepDefinition,
   EndStepDefinition,
   ExternalSessionStepDefinition,
+  HumanTaskStepDefinition,
   SleepStepDefinition,
   SignalStepDefinition,
   TaskStepDefinition,
@@ -110,6 +112,17 @@ export const signal = (
   ...definition,
 })
 
+export const humanTaskStep = (
+  definition: HumanTaskStepDefinition
+): HumanTaskStepDefinition => definition
+
+export const humanTask = (
+  definition: Omit<HumanTaskStepDefinition, "kind">
+): HumanTaskStepDefinition => ({
+  kind: "humanTask",
+  ...definition,
+})
+
 export const childStep = (
   definition: ChildStepDefinition
 ): ChildStepDefinition => definition
@@ -118,6 +131,17 @@ export const child = (
   definition: Omit<ChildStepDefinition, "kind">
 ): ChildStepDefinition => ({
   kind: "child",
+  ...definition,
+})
+
+export const fanOutStep = (
+  definition: FanOutStepDefinition
+): FanOutStepDefinition => definition
+
+export const fanOut = (
+  definition: Omit<FanOutStepDefinition, "kind">
+): FanOutStepDefinition => ({
+  kind: "fanOut",
   ...definition,
 })
 
@@ -185,6 +209,12 @@ const validateWorkflowDefinition = (workflow: WorkflowDefinition) => {
         )
       }
     }
+
+    if (step.kind === "fanOut" && step.join?.kind === "quorum" && step.join.count < 1) {
+      throw new Error(
+        `Workflow "${workflow.name}" step "${stepKey}" quorum count must be at least 1`
+      )
+    }
   }
 }
 
@@ -250,8 +280,18 @@ export const renderWorkflowAsMermaid = (
       continue
     }
 
+    if (step.kind === "humanTask") {
+      lines.push(`  ${nodeId}{{/"${label}"/}}`)
+      continue
+    }
+
     if (step.kind === "child") {
       lines.push(`  ${nodeId}[/"${label}"/]`)
+      continue
+    }
+
+    if (step.kind === "fanOut") {
+      lines.push(`  ${nodeId}[\\\\"${label}"//]`)
       continue
     }
 

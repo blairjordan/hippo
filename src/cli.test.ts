@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 
 import { createHippoCli } from "./cli.js"
+import type { HippoProcessRole } from "./lib/process-role.js"
 import type {
   WorkflowDefinition,
   WorkflowRunRecord,
@@ -98,6 +99,11 @@ const createHarness = () => {
     loadWorkflowDefinitions: vi.fn(async () => [testWorkflowDefinition]),
     renderWorkflowAsMermaid: vi.fn(() => "flowchart TD"),
     bootstrapStore: vi.fn(async () => ({ sql, store })),
+    runProcessRole: vi.fn(
+      async (args: { role: HippoProcessRole; workflowsPath: string }) => {
+        void args
+      }
+    ),
   }
   const cli = createHippoCli(deps)
 
@@ -216,5 +222,27 @@ describe("hippo cli", () => {
     expect(stdout).toContain(
       `Cancellation request ('hard') submitted for run ${testRun.id}.`
     )
+  })
+
+  it("starts only the API role for serve", async () => {
+    const { cli, deps } = createHarness()
+
+    await cli.parseAsync(["node", "hippo", "serve"])
+
+    expect(deps.runProcessRole).toHaveBeenCalledWith({
+      role: "serve",
+      workflowsPath: "./dist/src/workflows/index.js",
+    })
+  })
+
+  it("starts only background loops for work", async () => {
+    const { cli, deps } = createHarness()
+
+    await cli.parseAsync(["node", "hippo", "work"])
+
+    expect(deps.runProcessRole).toHaveBeenCalledWith({
+      role: "work",
+      workflowsPath: "./dist/src/workflows/index.js",
+    })
   })
 })

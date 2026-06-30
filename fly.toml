@@ -6,6 +6,7 @@ primary_region = "syd"
 
 [env]
   HIPPO_ENV = "prod"
+  HIPPO_ROLE = "all"
   HIPPO_HOST = "0.0.0.0"
   HIPPO_PORT = "3000"
 

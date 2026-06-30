@@ -91,11 +91,10 @@ Tier 3 — differentiation
 - [~] Time-travel replay (snapshot rewind / fork — Path A)
   Current state: workflow_step_attempts now persist monotonic `step_seq` plus `context_before`, runs persist branching lineage, operator APIs can `rewind` or `fork` a terminal run from a prior forward attempt, and both the dashboard and operator API expose run lineage chains.
   Open: support for non-terminal rewinds with wait/child cleanup semantics, plus explicit archival/replay UX on top of the branching primitives.
-- [ ] Human-in-the-loop task with URL + expiry
+- [x] Human-in-the-loop task with URL + expiry
 - [x] Webhook callback waits with built-in HMAC verification
-- [~] OpenTelemetry spans
-  Current state: dashboard reads, operator queries, run detail/context reads, SSE setup, start/cancel/retry/rewind/fork, engine start/tick/resume/compensation, worker ticks, scheduler ticks/dispatch, recovery passes, outbox delivery, and major store operations now emit nested OpenTelemetry-compatible spans through a shared tracer.
-  Open: emit richer status/event attributes and publish copy-paste host-process examples for wiring exporters and resource metadata.
+- [x] OpenTelemetry spans
+  Current state: dashboard reads, operator queries, run detail/context reads, SSE setup, start/cancel/retry/rewind/fork, engine start/tick/resume/compensation, worker ticks, scheduler ticks/dispatch, recovery passes, outbox delivery, and major store operations emit nested spans through the shared tracer. Step spans now carry attempt number, retry count, task queue, priority, child run id, and wait correlation attributes, and Hippo can bootstrap OTLP exporters from env with checked-in Honeycomb docs and an example snippet.
 - [~] Typed TypeScript workflows + validated step IO
   Current state: typed workflow definitions exist.
   Open: Zod-validated step inputs and outputs.
@@ -195,6 +194,7 @@ Tier 5 — Productized local/staging/prod DX
   Spawns Postgres via docker-compose (if not running), runs migrations, starts hippo server + worker with hot-reload of workflows (tsx watch). Logs colored, structured.
 - [~] Web dashboard
   Current state: embedded `/dashboard` route with active/failed run lists, workflow definition Mermaid views, run detail page, and live event tail.
+  Critical open: add a Hatchet-style trace view on run detail with `Overview / Traces / Logs` ergonomics and a realtime hierarchical timeline so operators can inspect parent/child execution, step durations, overlaps, retries, waits, and the currently-running segment as a live-updating Gantt-style tree.
   Embedded route /dashboard. Server-rendered (Fastify + minimal React or vanilla HTMX) — no separate frontend service. Views:
     - Run list with filter by workflow / status / search attrs
     - Run detail: live Mermaid render with current step highlighted, event log timeline, attempt history with input/output diffs, context viewer
@@ -221,14 +221,15 @@ Tier 5 — Productized local/staging/prod DX
   - Cron-triggered nightly report
   - Long-running approval (signal + wait + expiry)
   - Fan-out via child workflows (when child workflows ship)
-- [~] Deployment recipes
-  Current state: single-container deploy recipes now exist via `Dockerfile`, `fly.toml`, `railway.json`, `render.yaml`, plus `docs/deploy.md`.
-  Open: multi-container option (`api + N workers`) once `hippo server` / `hippo worker` split lands.
+- [x] Throughput benchmark
+  Current state: `bench/throughput.ts` provisions an isolated Postgres database per worker-count scenario, measures claims/sec plus p50/p95/p99 end-to-end latency, and records a null-claim contention proxy while backlog remains. `docs/BENCHMARKS.md` captures the reproduction command, hardware, and measured worker-scale results.
+- [x] Deployment recipes
+  Current state: `Dockerfile`, `fly.toml`, `railway.json`, `render.yaml`, and `docs/deploy.md` now cover both single-process (`HIPPO_ROLE=all`) and split-role (`HIPPO_ROLE=serve|work`) deploy shapes.
 - [~] README quickstart < 5 minutes
   Current state: top-level README now describes the truthful source-repo flow (`npm run hippo:init -- my-app`), dashboard entrypoint, and example run command.
   Open: switch the docs to `npx hippo init my-app` once the CLI is packaged and published.
 - [~] CLI ergonomics
-  Current state: `hippo migrate`, `hippo render`, `hippo worker`, `hippo server`, `hippo runs ls`, `hippo runs show <id>`, `hippo runs cancel <id>`, `hippo workflows ls`, and `hippo workflows render <name>` exist.
+  Current state: `hippo migrate`, `hippo render`, `hippo serve`, `hippo work`, `hippo all`, `hippo runs ls`, `hippo runs show <id>`, `hippo runs cancel <id>`, `hippo workflows ls`, and `hippo workflows render <name>` exist, with `server` and `worker` retained as aliases.
   Open: JSON/scriptable output mode, terminate/retry/rewind/fork commands, schedule commands, and packaging validation for `npx hippo`.
 
 Cross-cutting acceptance for Tier 5

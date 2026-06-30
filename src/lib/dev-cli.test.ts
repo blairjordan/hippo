@@ -29,6 +29,29 @@ describe("dev cli helpers", () => {
     ])
   })
 
+  it("builds a role-specific dev command plan", () => {
+    expect(createHippoDevPlan({ platform: "linux", role: "work" })).toEqual([
+      {
+        kind: "setup",
+        command: "docker",
+        args: ["compose", "up", "-d", "postgres"],
+      },
+      {
+        kind: "setup",
+        command: "npm",
+        args: ["run", "db:migrate"],
+      },
+      {
+        kind: "serve",
+        command: "npx",
+        args: ["tsx", "src/index.ts"],
+        env: {
+          HIPPO_ROLE: "work",
+        },
+      },
+    ])
+  })
+
   it("parses dotenv-style file contents", () => {
     expect(
       parseEnvFileContent(`

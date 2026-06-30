@@ -15,8 +15,12 @@ import {
   defineWorkflow,
   endStep,
   externalSession,
+  fanOut,
+  humanTask,
   taskStep,
+  waitStep,
 } from "./workflow-definition.js"
+import { isHumanTaskWaitPayload } from "./engine/human-task.js"
 import { createMetrics } from "./metrics.js"
 import { createWorkflowEngine } from "./workflow-engine.js"
 import { createWorkflowStore } from "./workflow-store.js"
@@ -507,6 +511,157 @@ describe.skipIf(!testDatabaseUrl)("workflow store postgres integration", () => {
     })
   })
 
+  it("runs fan-out children and resumes the parent through the SQL store", async () => {
+    const childWorkflow = defineWorkflow({
+      name: "pg-fanout-child",
+      version: 1,
+      startAt: "work",
+      steps: {
+        work: taskStep({
+          kind: "task",
+          next: "done",
+          run: ({ input }) => {
+            if (input["shouldFail"] === true) {
+              throw new Error(`pg-fanout-child-${String(input["index"])}`)
+            }
+
+            const index = input["index"]
+
+            if (typeof index !== "number") {
+              throw new Error("pg fan-out child index must be a number")
+            }
+
+            return {
+              patch: {
+                index,
+              },
+            }
+          },
+        }),
+        done: endStep(),
+      },
+    })
+    const parentWorkflow = defineWorkflow({
+      name: "pg-fanout-parent",
+      version: 1,
+      startAt: "spread",
+      steps: {
+        spread: fanOut({
+          next: "done",
+          failureMode: "collect",
+          children: () => [
+            { workflow: childWorkflow.name, input: { index: 0 } },
+            { workflow: childWorkflow.name, input: { index: 1, shouldFail: true } },
+            { workflow: childWorkflow.name, input: { index: 2 } },
+          ],
+          resume: (_context, childRuns) => ({
+            patch: {
+              childStatuses: childRuns.map((run) => run.status),
+              childIndexes: childRuns.map((run) => run.context["index"] ?? null),
+            },
+          }),
+        }),
+        done: endStep(),
+      },
+    })
+    const engine = createWorkflowEngine({
+      definitions: [parentWorkflow, childWorkflow],
+      metrics: createMetrics(),
+      store,
+    })
+
+    const parentRun = await engine.startRun({
+      workflowName: parentWorkflow.name,
+      payload: {},
+    })
+
+    await drainEngine(engine)
+
+    const completedParent = await store.getRun(parentRun.id)
+    const childRuns = await store.listChildRuns(parentRun.id)
+
+    expect(completedParent?.status).toBe("completed")
+    expect(completedParent?.context.childStatuses).toEqual([
+      "completed",
+      "failed",
+      "completed",
+    ])
+    expect(completedParent?.context.childIndexes).toEqual([0, null, 2])
+    expect(childRuns).toHaveLength(3)
+  })
+
+  it("surfaces timed-out fan-out children to the parent join through the SQL store", async () => {
+    const waitingChildWorkflow = defineWorkflow({
+      name: "pg-fanout-timeout-child",
+      version: 1,
+      startAt: "hold",
+      steps: {
+        hold: waitStep({
+          kind: "wait",
+          next: "done",
+          timeoutMs: 60_000,
+          open: (context) => ({
+            correlationKey: `pg-fanout-hold:${context.run.id}`,
+          }),
+          resume: () => ({}),
+        }),
+        done: endStep(),
+      },
+    })
+    const fastChildWorkflow = defineWorkflow({
+      name: "pg-fanout-timeout-fast-child",
+      version: 1,
+      startAt: "done",
+      steps: {
+        done: endStep(),
+      },
+    })
+    const parentWorkflow = defineWorkflow({
+      name: "pg-fanout-timeout-parent",
+      version: 1,
+      startAt: "spread",
+      steps: {
+        spread: fanOut({
+          next: "done",
+          timeoutMs: 1,
+          children: () => [
+            { workflow: fastChildWorkflow.name, input: { index: 0 } },
+            { workflow: waitingChildWorkflow.name, input: { index: 1 } },
+          ],
+          resume: (_context, childRuns) => ({
+            patch: {
+              childStatuses: childRuns.map((run) => run.status),
+            },
+          }),
+        }),
+        done: endStep(),
+      },
+    })
+    const engine = createWorkflowEngine({
+      definitions: [parentWorkflow, fastChildWorkflow, waitingChildWorkflow],
+      metrics: createMetrics(),
+      store,
+    })
+
+    const parentRun = await engine.startRun({
+      workflowName: parentWorkflow.name,
+      payload: {},
+    })
+
+    await drainEngine(engine)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    expect(await store.expireOpenWaits({ limit: 100 })).toBeGreaterThan(0)
+    await drainEngine(engine)
+
+    const completedParent = await store.getRun(parentRun.id)
+
+    expect(completedParent?.status).toBe("completed")
+    expect(completedParent?.context.childStatuses).toEqual([
+      "completed",
+      "canceled",
+    ])
+  })
+
   it("deduplicates run creation by workflow and idempotency key", async () => {
     const workflow = defineWorkflow({
       name: "idempotent-start",
@@ -700,6 +855,147 @@ describe.skipIf(!testDatabaseUrl)("workflow store postgres integration", () => {
     expect(resumedWaitRows.rows[0]?.resume_output).toEqual({
       status: "complete",
     })
+  })
+
+  it("persists and resumes human task waits through the SQL store", async () => {
+    const workflow = defineWorkflow({
+      name: "pg-human-task",
+      version: 1,
+      startAt: "review",
+      steps: {
+        review: humanTask({
+          next: "done",
+          timeoutMs: 300_000,
+          open: ({ approvalUrl, formUrl }) => ({
+            prompt: {
+              approvalUrl,
+              formUrl,
+            },
+          }),
+          resume: (_context, decision) => ({
+            patch: {
+              decision: decision.decision,
+              data: decision.data ?? null,
+            },
+          }),
+          timeout: {
+            transition: "timed-out",
+          },
+          transitions: {
+            timeout: "timed-out",
+          },
+        }),
+        "timed-out": endStep(),
+        done: endStep(),
+      },
+    })
+    const engine = createWorkflowEngine({
+      definitions: [workflow],
+      humanTasks: {
+        baseUrl: "http://127.0.0.1:3000",
+        secret: "pg-human-secret",
+        toleranceSeconds: 300,
+      },
+      metrics: createMetrics(),
+      store,
+    })
+
+    const run = await engine.startRun({
+      workflowName: workflow.name,
+      payload: {},
+    })
+
+    await engine.tick("pg-test-worker", 15_000)
+
+    const [wait] = await store.listStepWaits({ runId: run.id, stepKey: "review" })
+    expect(wait).toBeTruthy()
+    expect(isHumanTaskWaitPayload(wait?.payload)).toBe(true)
+    if (!wait || !isHumanTaskWaitPayload(wait.payload)) {
+      throw new Error("expected persisted human task wait")
+    }
+
+    expect(wait.payload.approvalUrl).toContain("/v1/human-tasks/")
+    expect(wait.payload.formUrl).toContain("/human-tasks/")
+
+    const resumed = await engine.resumeHumanTask({
+      correlationKey: wait.correlationKey,
+      decision: {
+        decision: "approve",
+        data: {
+          reviewer: "pg-alice",
+        },
+      },
+    })
+    await drainEngine(engine)
+
+    const completedRun = await store.getRun(run.id)
+
+    expect(resumed.status).toBe("resumed")
+    expect(completedRun?.status).toBe("completed")
+    expect(completedRun?.context).toMatchObject({
+      decision: "approve",
+      data: {
+        reviewer: "pg-alice",
+      },
+    })
+  })
+
+  it("routes timed-out human task waits through recovery in the SQL store", async () => {
+    const workflow = defineWorkflow({
+      name: "pg-human-task-timeout",
+      version: 1,
+      startAt: "review",
+      steps: {
+        review: humanTask({
+          next: "done",
+          timeoutMs: 1,
+          open: () => ({}),
+          resume: (_context, decision) => ({
+            patch: {
+              decision: decision.decision,
+            },
+          }),
+          timeout: {
+            transition: "timed-out",
+            patch: {
+              timedOut: true,
+            },
+          },
+          transitions: {
+            timeout: "timed-out",
+          },
+        }),
+        "timed-out": endStep(),
+        done: endStep(),
+      },
+    })
+    const engine = createWorkflowEngine({
+      definitions: [workflow],
+      humanTasks: {
+        baseUrl: "http://127.0.0.1:3000",
+        secret: "pg-human-secret",
+        toleranceSeconds: 300,
+      },
+      metrics: createMetrics(),
+      store,
+    })
+
+    const run = await engine.startRun({
+      workflowName: workflow.name,
+      payload: {},
+    })
+
+    await engine.tick("pg-test-worker", 15_000)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    expect(await store.expireOpenWaits({ limit: 100 })).toBeGreaterThan(0)
+    await drainEngine(engine)
+
+    const completedRun = await store.getRun(run.id)
+    const [wait] = await store.listStepWaits({ runId: run.id, stepKey: "review" })
+
+    expect(completedRun?.status).toBe("completed")
+    expect(completedRun?.context.timedOut).toBe(true)
+    expect(wait?.status).toBe("expired")
   })
 
   it("rewinds and forks from a stored attempt snapshot", async () => {

@@ -14,6 +14,7 @@ import {
   continueAsNewInsertRun as continueAsNewInsertRunQuery,
   continueAsNewSetResult as continueAsNewSetResultQuery,
   completeStandaloneStepAttempt as completeStandaloneStepAttemptQuery,
+  completeExpiredWaitTransition as completeExpiredWaitTransitionQuery,
   completeWaitResume as completeWaitResumeQuery,
   consumeSignal as consumeSignalQuery,
   countOpenWaits as countOpenWaitsQuery,
@@ -23,8 +24,10 @@ import {
   exhaustRunBudget as exhaustRunBudgetQuery,
   expireOpenWaits as expireOpenWaitsQuery,
   failTransactionalTask as failTransactionalTaskQuery,
+  failExpiredWaitRun as failExpiredWaitRunQuery,
   failRun as failRunQuery,
   failStandaloneStepAttempt as failStandaloneStepAttemptQuery,
+  getFanOutWaitByChildRunId as getFanOutWaitByChildRunIdQuery,
   getChildRun as getChildRunQuery,
   getLastStepAttempt as getLastStepAttemptQuery,
   getLastStepSequence as getLastStepSequenceQuery,
@@ -50,12 +53,15 @@ import {
   listRunLineage as listRunLineageQuery,
   listRuns as listRunsQuery,
   listSchedules as listSchedulesQuery,
+  listStepWaits as listStepWaitsQuery,
   listStuckRuns as listStuckRunsQuery,
   markOutboxDelivered as markOutboxDeliveredQuery,
   markRunCompensationFailed as markRunCompensationFailedQuery,
   markRunSuperseded as markRunSupersededQuery,
+  openFanOutWaits as openFanOutWaitsQuery,
   openWait as openWaitQuery,
   ping as pingQuery,
+  queueWaitingRun as queueWaitingRunQuery,
   recoverExpiredLeases as recoverExpiredLeasesQuery,
   recordExternalHeartbeat as recordExternalHeartbeatQuery,
   recordExternalSessionEvent as recordExternalSessionEventQuery,
@@ -66,6 +72,7 @@ import {
   scheduleRetry as scheduleRetryQuery,
   scheduleSleep as scheduleSleepQuery,
   startRunIdempotent as startRunIdempotentQuery,
+  updateWaitStatus as updateWaitStatusQuery,
   wakeParentForChild as wakeParentForChildQuery,
   getKv as getKvQuery,
   setKv as setKvQuery,
@@ -94,6 +101,13 @@ import type {
 } from "../types/workflow.js"
 import type { Database } from "./db.js"
 import { withTransaction } from "./db.js"
+import {
+  getFanOutJoinState,
+  getFanOutWaitPayload,
+  groupFanOutWaitsByChildRunId,
+  isFanOutWaitPayload,
+} from "./engine/fan-out.js"
+import { isHumanTaskWaitPayload } from "./engine/human-task.js"
 import {
   createHippoTracer,
   createTraceAttributes,
@@ -1172,6 +1186,58 @@ export const createWorkflowStore = (
       }
     )
 
+  const openFanOutWaits = async (args: {
+    runId: string
+    stepKey: string
+    workerId: string
+    attemptId: string
+    context: JsonObject
+    waits: Array<{
+      correlationKey: string
+      payload: JsonObject
+      expiresAt: Date | null
+    }>
+    output: JsonValue | null
+  }) =>
+    withStoreSpan(
+      {
+        name: "open_fanout_waits",
+        attributes: createTraceAttributes({
+          operation: "store.open_fanout_waits",
+          runId: args.runId,
+          stepKey: args.stepKey,
+          workerId: args.workerId,
+        }),
+      },
+      async () => {
+        const [row] = await openFanOutWaitsQuery.run(
+          {
+            ...args,
+            waits: JSON.stringify(
+              args.waits.map((wait) => ({
+                correlation_key: wait.correlationKey,
+                payload: wait.payload,
+                expires_at: wait.expiresAt?.toISOString() ?? null,
+              }))
+            ),
+            eventType: "wait.opened",
+            eventPayload: {
+              count: args.waits.length,
+            },
+          },
+          db
+        )
+
+        if (!row) {
+          throw new LostLeaseError("Failed to open fan-out waits under active lease")
+        }
+
+        const run = mapRun(row)
+        await notifyRunEvent(run.id)
+        return run
+      }
+    )
+
   const scheduleRetry = async (args: {
     runId: string
     stepKey: string
@@ -1629,6 +1695,174 @@ export const createWorkflowStore = (
       }
     )
 
+  const listStepWaits = async (args: { runId: string; stepKey: string }) =>
+    withStoreSpan(
+      {
+        name: "list_step_waits",
+        attributes: createTraceAttributes({
+          operation: "store.list_step_waits",
+          runId: args.runId,
+          stepKey: args.stepKey,
+        }),
+      },
+      async () => {
+        const rows = await listStepWaitsQuery.run(args, db)
+        return rows.map(mapWait)
+      }
+    )
+
+  const settleFanOutParent = async (args: {
+    wait: WorkflowWaitRecord
+    childRun: WorkflowRunRecord | null
+    status: "resumed" | "expired"
+  }) =>
+    withTransaction(db, async (client) => {
+      const waitRows = await listStepWaitsQuery.run(
+        {
+          runId: args.wait.runId,
+          stepKey: args.wait.stepKey,
+        },
+        client
+      )
+      const waits = waitRows.map(mapWait)
+      const matchingWait = waits.find((wait) => wait.id === args.wait.id) ?? args.wait
+
+      if (!isFanOutWaitPayload(matchingWait.payload)) {
+        return false
+      }
+
+      if (matchingWait.status === "open") {
+        await updateWaitStatusQuery.run(
+          {
+            waitId: matchingWait.id,
+            status: args.status,
+            resumePayload:
+              args.status === "resumed" && args.childRun
+                ? {
+                    childRunId: args.childRun.id,
+                    childStatus: args.childRun.status,
+                  }
+                : args.status === "expired"
+                  ? {
+                      childRunId: matchingWait.payload.childRunId,
+                      childStatus: "timed_out",
+                    }
+                  : null,
+          },
+          client
+        )
+      }
+
+      const childRows = await listChildRunsQuery.run(
+        { parentRunId: args.wait.runId },
+        client
+      )
+      const childRuns = childRows
+        .map(mapRun)
+        .filter((run) => run.parentStepKey === args.wait.stepKey)
+      const currentWaitRows = await listStepWaitsQuery.run(
+        {
+          runId: args.wait.runId,
+          stepKey: args.wait.stepKey,
+        },
+        client
+      )
+      const currentWaits = currentWaitRows.map(mapWait)
+      const fanOutPayload = getFanOutWaitPayload(currentWaits)
+
+      if (!fanOutPayload) {
+        return false
+      }
+
+      const joinStateBeforeCancel = getFanOutJoinState({
+        childRuns,
+        waits: currentWaits,
+      })
+
+      if (fanOutPayload.failureMode === "fail-fast" && joinStateBeforeCancel.hasFailure) {
+        const waitsByChildRunId = groupFanOutWaitsByChildRunId(currentWaits)
+
+        for (const childRun of childRuns) {
+          if (terminalRunStatuses.has(childRun.status)) {
+            continue
+          }
+
+          const [canceledRow] = await requestCancelRunQuery.run(
+            {
+              runId: childRun.id,
+              mode: "hard",
+              eventType: "run.canceled",
+              eventPayload: { reason: "Fan-out child failed fast" },
+            },
+            client
+          )
+          const canceledRun = canceledRow ? mapRun(canceledRow) : childRun
+          const siblingWait = waitsByChildRunId.get(canceledRun.id)
+
+          if (siblingWait?.status === "open") {
+            await updateWaitStatusQuery.run(
+              {
+                waitId: siblingWait.id,
+                status: "resumed",
+                resumePayload: {
+                  childRunId: canceledRun.id,
+                  childStatus: canceledRun.status,
+                },
+              },
+              client
+            )
+          }
+        }
+      }
+
+      const finalWaitRows = await listStepWaitsQuery.run(
+        {
+          runId: args.wait.runId,
+          stepKey: args.wait.stepKey,
+        },
+        client
+      )
+      const finalWaits = finalWaitRows.map(mapWait)
+      const finalChildRows = await listChildRunsQuery.run(
+        { parentRunId: args.wait.runId },
+        client
+      )
+      const finalChildRuns = finalChildRows
+        .map(mapRun)
+        .filter((run) => run.parentStepKey === args.wait.stepKey)
+      const joinState = getFanOutJoinState({
+        childRuns: finalChildRuns,
+        waits: finalWaits,
+      })
+
+      if (!joinState.ready) {
+        return false
+      }
+
+      const [queuedRow] = await queueWaitingRunQuery.run(
+        {
+          runId: args.wait.runId,
+          stepKey: args.wait.stepKey,
+          eventType: "child.completed",
+          eventPayload: {
+            fanOut: true,
+            childCount: joinState.childCount,
+            terminalCount: joinState.terminalCount,
+            successfulCount: joinState.successfulCount,
+          },
+        },
+        client
+      )
+
+      if (!queuedRow) {
+        return false
+      }
+
+      await notifyRunnable()
+      await notifyRunEvent(queuedRow.id)
+      return true
+    })
+
   const recordExternalSessionEvent = async (args: {
     externalSessionId: string
     type: string
@@ -1688,8 +1922,113 @@ export const createWorkflowStore = (
         },
       },
       async () => {
-        const [row] = await expireOpenWaitsQuery.run(args, db)
-        return requireRow(row, "Failed to expire open waits").expiredCount ?? 0
+        const rows = await (
+          expireOpenWaitsQuery as {
+            run: (params: { limit: number }, executor: Database) => Promise<
+              Array<{
+                id: string
+                runId: string
+                stepKey: string
+                correlationKey: string
+                payload: JsonValue
+                expiresAt: Date | null
+              }>
+            >
+          }
+        ).run(args, db)
+        let expiredCount = 0
+
+        for (const row of rows) {
+          expiredCount += 1
+
+          await updateWaitStatusQuery.run(
+            {
+              waitId: row.id,
+              status: "expired",
+              resumePayload: null,
+            },
+            db
+          )
+
+          if (isHumanTaskWaitPayload(row.payload)) {
+            const [queuedRow] = await completeExpiredWaitTransitionQuery.run(
+              {
+                waitId: row.id,
+                runId: row.runId,
+                stepKey: row.stepKey,
+                nextStepKey: row.payload.timeout.nextStepKey,
+                context: row.payload.timeout.context,
+                output: row.payload.timeout.output,
+                eventType: "wait.expired",
+                eventPayload: {
+                  nextStepKey: row.payload.timeout.nextStepKey,
+                },
+              },
+              db
+            )
+
+            if (queuedRow) {
+              const queuedRun = mapRun(queuedRow)
+              await notifyRunnable()
+              await notifyRunEvent(queuedRun.id)
+            }
+            continue
+          }
+
+          if (!isFanOutWaitPayload(row.payload)) {
+            const [failedRow] = await (
+              failExpiredWaitRunQuery as {
+                run: (params: { runId: string; stepKey: string }, executor: Database) => Promise<
+                  Array<{ runId: string }>
+                >
+              }
+            ).run(
+              {
+                runId: row.runId,
+                stepKey: row.stepKey,
+              },
+              db
+            )
+
+            if (failedRow) {
+              await notifyRunEvent(failedRow.runId)
+            }
+            continue
+          }
+
+          const existingChildRun = await getRun(row.payload.childRunId)
+          const childRun =
+            existingChildRun && !terminalRunStatuses.has(existingChildRun.status)
+              ? await requestCancelRun({
+                  runId: row.payload.childRunId,
+                  mode: "hard",
+                  reason: "Fan-out child timed out",
+                })
+              : existingChildRun
+
+          await settleFanOutParent({
+            wait: {
+              id: row.id,
+              runId: row.runId,
+              stepKey: row.stepKey,
+              correlationKey: row.correlationKey,
+              status: "expired",
+              payload: row.payload,
+              resumePayload: null,
+              resumeOutput: null,
+              expiresAt: row.expiresAt ?? null,
+              createdAt: new Date(),
+              updatedAt: new Date(),
+              resumedAt: null,
+              externalSessionId: null,
+              externalSessionKind: null,
+            },
+            childRun,
+            status: "expired",
+          })
+        }
+
+        return expiredCount
       }
     )
   }
@@ -1807,7 +2146,20 @@ export const createWorkflowStore = (
       return true
     }
 
-    return false
+    const [fanOutWaitRow] = await getFanOutWaitByChildRunIdQuery.run(
+      { childRunId: childRun.id },
+      db
+    )
+
+    if (!fanOutWaitRow) {
+      return false
+    }
+
+    return settleFanOutParent({
+      wait: mapWait(fanOutWaitRow),
+      childRun,
+      status: "resumed",
+    })
   }
 
   const requestCancelRun = async (args: {
@@ -2889,6 +3241,8 @@ export const createWorkflowStore = (
     getRunEvents,
     getRunUsage,
     listChildRuns,
+    listStepWaits,
+    openFanOutWaits,
     openWait,
     ping,
     listActiveRuns,

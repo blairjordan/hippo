@@ -4,6 +4,8 @@ import { z } from "zod"
 import {
   defineWorkflow,
   renderWorkflowAsMermaid,
+  fanOut,
+  humanTask,
   taskStep,
   task,
   wait,
@@ -24,6 +26,54 @@ describe("workflow rendering", () => {
     expect(output).toContain("step_0_classify_recipient --> step_1_send_email")
     expect(output).toContain("step_0_classify_recipient --> step_2_send_sms")
     expect(output).toContain("step_0_classify_recipient --> step_3_send_webhook")
+  })
+
+  it("renders fan-out steps with a dedicated Mermaid node shape", () => {
+    const output = renderWorkflowAsMermaid(
+      defineWorkflow({
+        name: "fanout-render",
+        version: 1,
+        startAt: "spread",
+        steps: {
+          spread: fanOut({
+            next: "done",
+            children: () => [],
+            resume: () => ({}),
+          }),
+          done: end(),
+        },
+      })
+    )
+
+    expect(output).toContain('(fanOut)"//]')
+  })
+
+  it("renders human task steps with a dedicated Mermaid node shape", () => {
+    const output = renderWorkflowAsMermaid(
+      defineWorkflow({
+        name: "human-task-render",
+        version: 1,
+        startAt: "review",
+        steps: {
+          review: humanTask({
+            next: "done",
+            timeoutMs: 60_000,
+            open: () => ({}),
+            resume: () => ({}),
+            timeout: {
+              transition: "timed-out",
+            },
+            transitions: {
+              timeout: "timed-out",
+            },
+          }),
+          "timed-out": end(),
+          done: end(),
+        },
+      })
+    )
+
+    expect(output).toContain('(humanTask)"/}}')
   })
 
   it("highlights the current step with a Mermaid class", () => {
@@ -50,6 +100,28 @@ describe("workflow rendering", () => {
         },
       })
     ).toThrow('references missing target "missing"')
+  })
+
+  it("rejects fan-out steps with a non-positive quorum", () => {
+    expect(() =>
+      defineWorkflow({
+        name: "bad-fanout",
+        version: 1,
+        startAt: "spread",
+        steps: {
+          spread: fanOut({
+            next: "done",
+            join: {
+              kind: "quorum",
+              count: 0,
+            },
+            children: () => [],
+            resume: () => ({}),
+          }),
+          done: end(),
+        },
+      })
+    ).toThrow("quorum count must be at least 1")
   })
 })
 
@@ -140,5 +212,21 @@ describe("step builders", () => {
 
     const myEnd = end()
     expect(myEnd.kind).toBe("end")
+
+    const myFanOut = fanOut({
+      next: "done",
+      failureMode: "collect",
+      join: {
+        kind: "quorum",
+        count: 2,
+      },
+      children: () => [],
+      resume: () => ({}),
+    })
+    expect(myFanOut.kind).toBe("fanOut")
+    expect(myFanOut.join).toEqual({
+      kind: "quorum",
+      count: 2,
+    })
   })
 })

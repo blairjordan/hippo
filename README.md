@@ -155,9 +155,13 @@ import { createApp, startWorkerLoop } from "pygmyhippo-server"
 
 Required: `DATABASE_URL`.
 
-Optional: `HIPPO_ENV`, `HIPPO_HOST`, `HIPPO_PORT`, `HIPPO_WORKER_ID`, `HIPPO_TASK_QUEUES`, `HIPPO_POLL_INTERVAL_MS`, `HIPPO_LEASE_MS`, `HIPPO_RECOVERY_INTERVAL_MS`, `HIPPO_SCHEDULE_INTERVAL_MS`, `HIPPO_OUTBOX_INTERVAL_MS`, `HIPPO_NOTIFICATION_CHANNEL`, `HIPPO_API_TOKEN`, `HIPPO_CALLBACK_SECRET`, `HIPPO_CALLBACK_TOLERANCE_SECONDS`.
+Optional: `HIPPO_ENV`, `HIPPO_ROLE`, `HIPPO_HOST`, `HIPPO_PORT`, `HIPPO_PUBLIC_BASE_URL`, `HIPPO_WORKER_ID`, `HIPPO_TASK_QUEUES`, `HIPPO_POLL_INTERVAL_MS`, `HIPPO_LEASE_MS`, `HIPPO_RECOVERY_INTERVAL_MS`, `HIPPO_SCHEDULE_INTERVAL_MS`, `HIPPO_OUTBOX_INTERVAL_MS`, `HIPPO_NOTIFICATION_CHANNEL`, `HIPPO_API_TOKEN`, `HIPPO_CALLBACK_SECRET`, `HIPPO_CALLBACK_TOLERANCE_SECONDS`.
 
 `HIPPO_ENV=dev` keeps defaults permissive. `staging` / `prod` require `HIPPO_API_TOKEN` and `HIPPO_CALLBACK_SECRET`.
+
+`HIPPO_ROLE=all` is the default. Set `HIPPO_ROLE=serve` for API-only processes or `HIPPO_ROLE=work` for worker-only processes.
+
+Set `HIPPO_PUBLIC_BASE_URL` when workers and API servers are split so `humanTask` approval URLs point at the externally reachable HTTP host.
 
 Deployment recipes: [`docs/deploy.md`](docs/deploy.md), `Dockerfile`, `fly.toml`, `railway.json`, `render.yaml`.
 
@@ -169,6 +173,14 @@ Signal a waiting run:
 curl -X POST -H "Authorization: Bearer $HIPPO_API_TOKEN" -H "Content-Type: application/json" \
   http://127.0.0.1:3000/v1/runs/<run-id>/signals/approved \
   -d '{"payload":{"approved":true}}'
+```
+
+Submit a signed human task decision:
+
+```bash
+curl -X POST -H "Content-Type: application/json" \
+  http://127.0.0.1:3000/v1/human-tasks/<signed-token> \
+  -d '{"decision":"approve","data":{"reviewer":"alice"}}'
 ```
 
 Cron schedule:

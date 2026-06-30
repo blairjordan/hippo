@@ -7,12 +7,14 @@ import { createDatabase } from "./db.js"
 import { runMigrations } from "./migration-runner.js"
 import { createMetrics } from "./metrics.js"
 import { createWorkflowNotifier } from "./notifier.js"
+import { runHippoProcessRole } from "./process-runtime.js"
 import { createHippoTracer } from "./tracing.js"
 import { renderWorkflowAsMermaid } from "./workflow-definition.js"
 import { loadWorkflowDefinitions } from "./workflow-loader.js"
 import { createWorkflowEngine, type WorkflowEngine } from "./workflow-engine.js"
 import { createWorkflowStore, type WorkflowStore } from "./workflow-store.js"
 import type { WorkflowDefinition } from "../types/workflow.js"
+import type { HippoProcessRole } from "./process-role.js"
 
 export type CliStore = Pick<
   WorkflowStore,
@@ -49,6 +51,10 @@ export type CliDeps = {
   renderWorkflowAsMermaid: (definition: WorkflowDefinition) => string
   bootstrapEngine: CliBootstrapEngine
   bootstrapStore: CliBootstrapStore
+  runProcessRole: (args: {
+    role: HippoProcessRole
+    workflowsPath: string
+  }) => Promise<void>
 }
 
 export const defaultWorkflowPath = "./dist/src/workflows/index.js"
@@ -110,6 +116,10 @@ export const createDefaultCliDeps = (): CliDeps => ({
   renderWorkflowAsMermaid,
   bootstrapEngine: createDefaultBootstrapEngine,
   bootstrapStore: createDefaultBootstrapStore,
+  runProcessRole: async ({ role, workflowsPath }) => {
+    await runHippoProcessRole({ role, workflowsPath })
+    return undefined
+  },
 })
 
 export const closeSql = async (sql: CliSql) => {

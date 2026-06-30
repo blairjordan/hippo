@@ -656,6 +656,88 @@ WITH updated_run AS (
 )
 SELECT * FROM updated_run;
 
+/* @name OpenFanOutWaits */
+WITH updated_run AS (
+  UPDATE workflow_runs
+  SET
+    status = 'waiting',
+    current_step_key = :stepKey,
+    context = :context,
+    result = NULL,
+    error = NULL,
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    available_at = now(),
+    updated_at = now()
+  WHERE id = :runId
+    AND current_step_key = :stepKey
+    AND lease_owner = :workerId
+    AND lease_expires_at >= now()
+  RETURNING
+    id,
+    parent_run_id AS "parentRunId",
+    parent_step_key AS "parentStepKey",
+    continued_from_run_id AS "continuedFromRunId",
+    branched_from_run_id AS "branchedFromRunId",
+    branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+    branched_from_attempt_id AS "branchedFromAttemptId",
+    superseded_by_run_id AS "supersededByRunId",
+    definition_name AS "definitionName",
+    definition_version AS "definitionVersion",
+    task_queue AS "taskQueue",
+    priority,
+    status,
+    current_step_key AS "currentStepKey",
+    input,
+    context,
+    result,
+    error,
+    lease_owner AS "leaseOwner",
+    lease_expires_at AS "leaseExpiresAt",
+    available_at AS "availableAt",
+    created_at AS "createdAt",
+    updated_at AS "updatedAt",
+    completed_at AS "completedAt"
+), inserted_waits AS (
+  INSERT INTO workflow_waits (
+    run_id,
+    step_key,
+    correlation_key,
+    status,
+    payload,
+    expires_at
+  )
+  SELECT
+    updated_run.id,
+    :stepKey,
+    wait_entry.correlation_key,
+    'open',
+    wait_entry.payload,
+    wait_entry.expires_at
+  FROM updated_run
+  CROSS JOIN LATERAL jsonb_to_recordset(:waits::jsonb) AS wait_entry(
+    correlation_key text,
+    payload jsonb,
+    expires_at timestamptz
+  )
+), updated_attempt AS (
+  UPDATE workflow_step_attempts
+  SET
+    status = 'completed',
+    output = :output,
+    error = NULL,
+    completed_at = now(),
+    updated_at = now()
+  WHERE id = :attemptId
+    AND run_id IN (SELECT id FROM updated_run)
+  RETURNING id
+), inserted_event AS (
+  INSERT INTO workflow_events (run_id, step_key, event_type, payload)
+  SELECT id, :stepKey, :eventType, :eventPayload
+  FROM updated_run
+)
+SELECT * FROM updated_run;
+
 /* @name ScheduleRetry */
 WITH updated_run AS (
   UPDATE workflow_runs
@@ -931,6 +1013,64 @@ WITH updated_wait AS (
 )
 SELECT * FROM updated_run;
 
+/* @name CompleteExpiredWaitTransition */
+WITH updated_run AS (
+  UPDATE workflow_runs
+  SET
+    status = 'queued',
+    current_step_key = :nextStepKey,
+    context = :context,
+    result = :output,
+    error = NULL,
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    available_at = now(),
+    updated_at = now()
+  WHERE id = :runId
+    AND status = 'waiting'
+    AND current_step_key = :stepKey
+  RETURNING
+    id,
+    parent_run_id AS "parentRunId",
+    parent_step_key AS "parentStepKey",
+    continued_from_run_id AS "continuedFromRunId",
+    branched_from_run_id AS "branchedFromRunId",
+    branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+    branched_from_attempt_id AS "branchedFromAttemptId",
+    superseded_by_run_id AS "supersededByRunId",
+    definition_name AS "definitionName",
+    definition_version AS "definitionVersion",
+    task_queue AS "taskQueue",
+    priority,
+    status,
+    current_step_key AS "currentStepKey",
+    input,
+    context,
+    result,
+    error,
+    lease_owner AS "leaseOwner",
+    lease_expires_at AS "leaseExpiresAt",
+    available_at AS "availableAt",
+    created_at AS "createdAt",
+    updated_at AS "updatedAt",
+    completed_at AS "completedAt"
+), updated_wait AS (
+  UPDATE workflow_waits
+  SET
+    resume_output = :output,
+    updated_at = now()
+  WHERE id = :waitId
+    AND status = 'expired'
+    AND EXISTS (SELECT 1 FROM updated_run)
+  RETURNING id
+), inserted_event AS (
+  INSERT INTO workflow_events (run_id, step_key, event_type, payload)
+  SELECT id, :stepKey, :eventType, :eventPayload
+  FROM updated_run
+  WHERE EXISTS (SELECT 1 FROM updated_wait)
+)
+SELECT * FROM updated_run;
+
 /* @name ExtendLease */
 WITH updated_run AS (
   UPDATE workflow_runs
@@ -1019,6 +1159,27 @@ FROM workflow_waits
 WHERE run_id = :runId
   AND status = 'open'
   AND external_session_id IS NOT NULL
+ORDER BY created_at ASC;
+
+/* @name ListStepWaits */
+SELECT
+  id,
+  run_id AS "runId",
+  step_key AS "stepKey",
+  correlation_key AS "correlationKey",
+  status,
+  payload,
+  resume_payload AS "resumePayload",
+  resume_output AS "resumeOutput",
+  expires_at AS "expiresAt",
+  created_at AS "createdAt",
+  updated_at AS "updatedAt",
+  resumed_at AS "resumedAt",
+  external_session_id AS "externalSessionId",
+  external_session_kind AS "externalSessionKind"
+FROM workflow_waits
+WHERE run_id = :runId
+  AND step_key = :stepKey
 ORDER BY created_at ASC;
 
 /* @name RecordExternalSessionEvent */
@@ -1195,23 +1356,23 @@ FROM workflow_waits
 WHERE status = 'open';
 
 /* @name ExpireOpenWaits */
-WITH expired_waits AS (
-  SELECT id, run_id AS "runId", step_key AS "stepKey"
-  FROM workflow_waits
-  WHERE status = 'open'
-    AND expires_at IS NOT NULL
-    AND expires_at < now()
-  ORDER BY expires_at ASC
-  FOR UPDATE SKIP LOCKED
-  LIMIT :limit
-), updated_waits AS (
-  UPDATE workflow_waits
-  SET
-    status = 'expired',
-    updated_at = now()
-  WHERE id IN (SELECT id FROM expired_waits)
-  RETURNING id
-), updated_runs AS (
+SELECT
+  id,
+  run_id AS "runId",
+  step_key AS "stepKey",
+  correlation_key AS "correlationKey",
+  payload,
+  expires_at AS "expiresAt"
+FROM workflow_waits
+WHERE status = 'open'
+  AND expires_at IS NOT NULL
+  AND expires_at < now()
+ORDER BY expires_at ASC
+FOR UPDATE SKIP LOCKED
+LIMIT :limit;
+
+/* @name FailExpiredWaitRun */
+WITH updated_run AS (
   UPDATE workflow_runs
   SET
     status = 'failed',
@@ -1221,16 +1382,18 @@ WITH expired_waits AS (
     available_at = now(),
     updated_at = now(),
     completed_at = now()
-  WHERE id IN (SELECT "runId" FROM expired_waits)
+  WHERE id = :runId
+    AND current_step_key = :stepKey
     AND status = 'waiting'
   RETURNING id
-), inserted_events AS (
+), inserted_event AS (
   INSERT INTO workflow_events (run_id, step_key, event_type, payload)
-  SELECT "runId", "stepKey", 'wait.expired', '{}'::jsonb
-  FROM expired_waits
+  SELECT id, :stepKey, 'wait.expired', '{}'::jsonb
+  FROM updated_run
 )
-SELECT COUNT(*)::int AS "expiredCount"
-FROM updated_waits;
+SELECT
+  id AS "runId"
+FROM updated_run;
 
 /* @name CreateSignal */
 WITH target_run AS (
@@ -1968,6 +2131,101 @@ WITH updated_wait AS (
 SELECT id AS "runId"
 FROM updated_run;
 
+/* @name GetFanOutWaitByChildRunId */
+SELECT
+  id,
+  run_id AS "runId",
+  step_key AS "stepKey",
+  correlation_key AS "correlationKey",
+  status,
+  payload,
+  resume_payload AS "resumePayload",
+  resume_output AS "resumeOutput",
+  expires_at AS "expiresAt",
+  created_at AS "createdAt",
+  updated_at AS "updatedAt",
+  resumed_at AS "resumedAt",
+  external_session_id AS "externalSessionId",
+  external_session_kind AS "externalSessionKind"
+FROM workflow_waits
+WHERE status = 'open'
+  AND payload->>'kind' = 'fanOutChild'
+  AND payload->>'childRunId' = :childRunId
+LIMIT 1;
+
+/* @name UpdateWaitStatus */
+UPDATE workflow_waits
+SET
+  status = :status::workflow_wait_status,
+  resume_payload = :resumePayload,
+  updated_at = now(),
+  resumed_at = CASE
+    WHEN :status::workflow_wait_status = 'resumed'::workflow_wait_status THEN now()
+    ELSE resumed_at
+  END
+WHERE id = :waitId
+RETURNING
+  id,
+  run_id AS "runId",
+  step_key AS "stepKey",
+  correlation_key AS "correlationKey",
+  status,
+  payload,
+  resume_payload AS "resumePayload",
+  resume_output AS "resumeOutput",
+  expires_at AS "expiresAt",
+  created_at AS "createdAt",
+  updated_at AS "updatedAt",
+  resumed_at AS "resumedAt",
+  external_session_id AS "externalSessionId",
+  external_session_kind AS "externalSessionKind";
+
+/* @name QueueWaitingRun */
+WITH updated_run AS (
+  UPDATE workflow_runs
+  SET
+    status = 'queued',
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    available_at = now(),
+    updated_at = now()
+  WHERE id = :runId
+    AND current_step_key = :stepKey
+    AND status = 'waiting'
+  RETURNING
+    id,
+    parent_run_id AS "parentRunId",
+    parent_step_key AS "parentStepKey",
+    continued_from_run_id AS "continuedFromRunId",
+    branched_from_run_id AS "branchedFromRunId",
+    branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+    branched_from_attempt_id AS "branchedFromAttemptId",
+    superseded_by_run_id AS "supersededByRunId",
+    definition_name AS "definitionName",
+    definition_version AS "definitionVersion",
+    task_queue AS "taskQueue",
+    priority,
+    status,
+    current_step_key AS "currentStepKey",
+    input,
+    context,
+    result,
+    error,
+    lease_owner AS "leaseOwner",
+    lease_expires_at AS "leaseExpiresAt",
+    cancel_requested_at AS "cancelRequestedAt",
+    cancel_mode AS "cancelMode",
+    available_at AS "availableAt",
+    created_at AS "createdAt",
+    updated_at AS "updatedAt",
+    completed_at AS "completedAt"
+), inserted_event AS (
+  INSERT INTO workflow_events (run_id, step_key, event_type, payload)
+  SELECT id, :stepKey, :eventType, :eventPayload
+  FROM updated_run
+)
+SELECT * FROM updated_run;
+
 /* @name RequestCancelRun */
 WITH updated_run AS (
   UPDATE workflow_runs
@@ -2407,4 +2665,3 @@ ON CONFLICT (run_id, key) DO UPDATE SET
 /* @name DeleteKV */
 DELETE FROM workflow_run_kv
 WHERE run_id = :runId AND key = :key;
-

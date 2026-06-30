@@ -5,11 +5,15 @@ import {
   defineWorkflow,
   endStep,
   externalSession,
+  fanOut,
+  humanTask,
   signalStep,
   sleepStep,
   taskStep,
   waitStep,
 } from "./workflow-definition.js"
+import { getFanOutJoinState, isFanOutWaitPayload } from "./engine/fan-out.js"
+import { isHumanTaskWaitPayload, verifyHumanTaskToken } from "./engine/human-task.js"
 import { createMetrics } from "./metrics.js"
 import { createHippoTracer } from "./tracing.js"
 import { createRecordingTracer } from "./tracing.test-helpers.js"
@@ -83,6 +87,7 @@ const createStoreStub = () => {
   let eventCounter = 0
   let usageCounter = 0
   const kvs = new Map<string, JsonValue>()
+  const runIdempotencyKeys = new Map<string, string>()
 
   const now = () => new Date()
 
@@ -122,6 +127,109 @@ const createStoreStub = () => {
       childStatus: childRun.status,
     }
     wait.resumedAt = now()
+
+    const parentRun = runs.get(childRun.parentRunId)
+
+    if (!parentRun) {
+      return false
+    }
+
+    runs.set(parentRun.id, {
+      ...parentRun,
+      status: "queued",
+      availableAt: now(),
+      leaseOwner: null,
+      leaseExpiresAt: null,
+    })
+    return true
+  }
+
+  const wakeParentForFanOutChildRun = (childRun: WorkflowRunRecord) => {
+    if (!childRun.parentRunId || !childRun.parentStepKey) {
+      return false
+    }
+
+    const fanOutWait = [...waits.values()].find(
+      (wait) =>
+        wait.runId === childRun.parentRunId &&
+        wait.stepKey === childRun.parentStepKey &&
+        wait.status === "open" &&
+        isFanOutWaitPayload(wait.payload) &&
+        wait.payload.childRunId === childRun.id
+    )
+
+    if (!fanOutWait) {
+      return false
+    }
+
+    fanOutWait.status = "resumed"
+    fanOutWait.resumePayload = {
+      childRunId: childRun.id,
+      childStatus: childRun.status,
+    }
+    fanOutWait.resumedAt = now()
+
+    const siblingWaits = [...waits.values()].filter(
+      (wait) => wait.runId === childRun.parentRunId && wait.stepKey === childRun.parentStepKey
+    )
+    const siblingRuns = [...runs.values()].filter(
+      (run) => run.parentRunId === childRun.parentRunId && run.parentStepKey === childRun.parentStepKey
+    )
+    const joinState = getFanOutJoinState({
+      childRuns: siblingRuns,
+      waits: siblingWaits,
+    })
+
+    if (joinState.failureMode === "fail-fast" && joinState.hasFailure) {
+      for (const siblingRun of siblingRuns) {
+        if (
+          ["completed", "failed", "compensation_failed", "exhausted_budget", "canceled"].includes(
+            siblingRun.status
+          )
+        ) {
+          continue
+        }
+
+        runs.set(siblingRun.id, {
+          ...siblingRun,
+          status: "canceled",
+          completedAt: now(),
+          leaseOwner: null,
+          leaseExpiresAt: null,
+        })
+
+        const siblingWait = siblingWaits.find(
+          (wait) =>
+            wait.status === "open" &&
+            isFanOutWaitPayload(wait.payload) &&
+            wait.payload.childRunId === siblingRun.id
+        )
+
+        if (siblingWait) {
+          siblingWait.status = "resumed"
+          siblingWait.resumePayload = {
+            childRunId: siblingRun.id,
+            childStatus: "canceled",
+          }
+          siblingWait.resumedAt = now()
+        }
+      }
+    }
+
+    const finalSiblingWaits = [...waits.values()].filter(
+      (wait) => wait.runId === childRun.parentRunId && wait.stepKey === childRun.parentStepKey
+    )
+    const finalSiblingRuns = [...runs.values()].filter(
+      (run) => run.parentRunId === childRun.parentRunId && run.parentStepKey === childRun.parentStepKey
+    )
+    const finalJoinState = getFanOutJoinState({
+      childRuns: finalSiblingRuns,
+      waits: finalSiblingWaits,
+    })
+
+    if (!finalJoinState.ready) {
+      return false
+    }
 
     const parentRun = runs.get(childRun.parentRunId)
 
@@ -248,7 +356,9 @@ const createStoreStub = () => {
       }
       runs.set(run.id, next)
       appendEvent({ runId: run.id, stepKey: run.currentStepKey, eventType: "run.completed" })
-      wakeParentForChildRun(next)
+      if (!wakeParentForChildRun(next)) {
+        wakeParentForFanOutChildRun(next)
+      }
       return next
     },
     async continueAsNew(args: {
@@ -421,14 +531,68 @@ const createStoreStub = () => {
         ) {
           wait.status = "expired"
           wait.updatedAt = now()
-          const run = runs.get(wait.runId)
-          if (run) {
-            runs.set(wait.runId, {
-              ...run,
-              status: "failed",
-              error: { message: "Wait step expired" },
-              completedAt: now(),
+          if (isHumanTaskWaitPayload(wait.payload)) {
+            const run = runs.get(wait.runId)
+
+            if (run) {
+              runs.set(wait.runId, {
+                ...run,
+                status: "queued",
+                currentStepKey: wait.payload.timeout.nextStepKey,
+                context: wait.payload.timeout.context,
+                result: wait.payload.timeout.output,
+                error: null,
+                availableAt: now(),
+                leaseOwner: null,
+                leaseExpiresAt: null,
+              })
+            }
+          } else if (isFanOutWaitPayload(wait.payload)) {
+            const childRun = runs.get(wait.payload.childRunId)
+
+            if (childRun && !["completed", "failed", "compensation_failed", "exhausted_budget", "canceled"].includes(childRun.status)) {
+              const canceledChildRun: WorkflowRunRecord = {
+                ...childRun,
+                status: "canceled",
+                completedAt: now(),
+                leaseOwner: null,
+                leaseExpiresAt: null,
+              }
+              runs.set(childRun.id, canceledChildRun)
+              wakeParentForFanOutChildRun(canceledChildRun)
+            }
+
+            const siblingWaits = [...waits.values()].filter(
+              (candidate) => candidate.runId === wait.runId && candidate.stepKey === wait.stepKey
+            )
+            const siblingRuns = [...runs.values()].filter(
+              (candidate) => candidate.parentRunId === wait.runId && candidate.parentStepKey === wait.stepKey
+            )
+            const joinState = getFanOutJoinState({
+              childRuns: siblingRuns,
+              waits: siblingWaits,
             })
+            const parentRun = runs.get(wait.runId)
+
+            if (joinState.ready && parentRun) {
+              runs.set(parentRun.id, {
+                ...parentRun,
+                status: "queued",
+                availableAt: now(),
+                leaseOwner: null,
+                leaseExpiresAt: null,
+              })
+            }
+          } else {
+            const run = runs.get(wait.runId)
+            if (run) {
+              runs.set(wait.runId, {
+                ...run,
+                status: "failed",
+                error: { message: "Wait step expired" },
+                completedAt: now(),
+              })
+            }
           }
           expiredCount += 1
         }
@@ -555,7 +719,9 @@ const createStoreStub = () => {
       }
       runs.set(run.id, next)
       appendEvent({ runId: run.id, stepKey: args.stepKey, eventType: "step.failed", payload: args.error })
-      wakeParentForChildRun(next)
+      if (!wakeParentForChildRun(next)) {
+        wakeParentForFanOutChildRun(next)
+      }
       return next
     },
     async failStepAttempt(args: {
@@ -607,6 +773,11 @@ const createStoreStub = () => {
     },
     async listChildRuns(parentRunId: string) {
       return [...runs.values()].filter((run) => run.parentRunId === parentRunId)
+    },
+    async listStepWaits(args: { runId: string; stepKey: string }) {
+      return [...waits.values()].filter(
+        (wait) => wait.runId === args.runId && wait.stepKey === args.stepKey
+      )
     },
     async listFailedRuns() {
       return [...runs.values()].filter((run) => run.status === "failed")
@@ -697,6 +868,59 @@ const createStoreStub = () => {
         stepKey: args.stepKey,
         eventType: "wait.opened",
         payload: { correlationKey: args.correlationKey },
+      })
+      return next
+    },
+    async openFanOutWaits(args: {
+      runId: string
+      stepKey: string
+      waits: Array<{
+        correlationKey: string
+        payload: JsonObject
+        expiresAt: Date | null
+      }>
+      output: JsonValue | null
+      attemptId: string
+      context: JsonObject
+    }) {
+      const run = runs.get(args.runId)!
+      const attempt = attempts.find((candidate) => candidate.id === args.attemptId)!
+      attempt.status = "completed"
+      attempt.output = args.output
+      attempt.completedAt = now()
+
+      for (const waitInput of args.waits) {
+        waits.set(waitInput.correlationKey, {
+          id: `wait-${++waitCounter}`,
+          runId: run.id,
+          stepKey: args.stepKey,
+          correlationKey: waitInput.correlationKey,
+          status: "open",
+          payload: waitInput.payload,
+          resumePayload: null,
+          resumeOutput: null,
+          expiresAt: waitInput.expiresAt,
+          createdAt: now(),
+          updatedAt: now(),
+          resumedAt: null,
+          externalSessionId: null,
+          externalSessionKind: null,
+        })
+      }
+
+      const next: WorkflowRunRecord = {
+        ...run,
+        status: "waiting",
+        context: args.context,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+      }
+      runs.set(run.id, next)
+      appendEvent({
+        runId: run.id,
+        stepKey: args.stepKey,
+        eventType: "wait.opened",
+        payload: { count: args.waits.length },
       })
       return next
     },
@@ -794,6 +1018,7 @@ const createStoreStub = () => {
     },
     async resumeWait(args: {
       correlationKey: string
+      payload: JsonValue | undefined
       resume: (
         run: WorkflowRunRecord,
         wait: WorkflowWaitRecord
@@ -813,7 +1038,7 @@ const createStoreStub = () => {
       }
       const resumed = await args.resume(run, wait)
       wait.status = "resumed"
-      wait.resumePayload = null
+      wait.resumePayload = args.payload ?? null
       wait.resumeOutput = resumed.output
       wait.resumedAt = now()
       const next: WorkflowRunRecord = {
@@ -1011,7 +1236,23 @@ const createStoreStub = () => {
       priority: number
       input: JsonObject
       currentStepKey: string
+      idempotencyKey?: string | null
+      traceContext?: string | null
     }) {
+      if (args.idempotencyKey) {
+        const existingRun = [...runs.values()].find(
+          (run) =>
+            run.definitionName === args.definitionName &&
+            run.parentRunId === (args.parentRunId ?? null) &&
+            run.parentStepKey === (args.parentStepKey ?? null) &&
+            runIdempotencyKeys.get(run.id) === args.idempotencyKey
+        )
+
+        if (existingRun) {
+          return existingRun
+        }
+      }
+
       const run: WorkflowRunRecord = {
         id: `run-${++runCounter}`,
         parentRunId: args.parentRunId ?? null,
@@ -1041,6 +1282,9 @@ const createStoreStub = () => {
         completedAt: null,
       }
       runs.set(run.id, run)
+      if (args.idempotencyKey) {
+        runIdempotencyKeys.set(run.id, args.idempotencyKey)
+      }
       appendEvent({ runId: run.id, stepKey: run.currentStepKey, eventType: "run.started" })
       return run
     },
@@ -1051,7 +1295,7 @@ const createStoreStub = () => {
       throw new Error("not used")
     },
     async wakeParentForChild(childRun: WorkflowRunRecord) {
-      return wakeParentForChildRun(childRun)
+      return wakeParentForChildRun(childRun) || wakeParentForFanOutChildRun(childRun)
     },
     async getRunKV(runId: string, key: string) {
       return kvs.get(`${runId}:${key}`) ?? null
@@ -1156,6 +1400,171 @@ describe("workflow engine", () => {
     expect(tickSpan).toBeDefined()
     expect(stepSpan?.parentName).toBe("hippo.workflow.tick")
     expect(taskSpan?.parentName).toBe("hippo.workflow.step.execute")
+  })
+
+  it("adds attempt and retry metadata to retried task spans", async () => {
+    let attempts = 0
+    const workflow = defineWorkflow({
+      name: "traced-retry-workflow",
+      version: 1,
+      startAt: "unstable",
+      steps: {
+        unstable: taskStep({
+          kind: "task",
+          next: "done",
+          retry: {
+            maxAttempts: 2,
+            initialBackoffMs: 0,
+          },
+          run: () => {
+            attempts += 1
+
+            if (attempts === 1) {
+              throw new Error("boom")
+            }
+
+            return {
+              patch: { ok: true },
+            }
+          },
+        }),
+        done: endStep(),
+      },
+    })
+    const store = createStoreStub()
+    const recording = createRecordingTracer()
+    const tracer = createHippoTracer({
+      tracer: recording.tracer,
+    })
+    const engine = createWorkflowEngine({
+      definitions: [workflow],
+      metrics: createMetrics(),
+      store,
+      tracer,
+    })
+
+    await engine.startRun({
+      workflowName: workflow.name,
+      payload: {},
+      taskQueue: "priority",
+      priority: 7,
+    })
+
+    await engine.tick("test-worker", 5_000)
+    recording.spans.length = 0
+    await engine.tick("test-worker", 5_000)
+
+    const stepSpan = recording.spans.find(
+      (span) => span.name === "hippo.workflow.step.execute"
+    )
+
+    expect(stepSpan?.attributes["workflow.attempt.number"]).toBe(2)
+    expect(stepSpan?.attributes["workflow.retry.count"]).toBe(1)
+    expect(stepSpan?.attributes["workflow.task_queue"]).toBe("priority")
+    expect(stepSpan?.attributes["workflow.priority"]).toBe(7)
+  })
+
+  it("adds wait correlation keys and child run ids to step spans", async () => {
+    const childWorkflow = defineWorkflow({
+      name: "trace-child",
+      version: 1,
+      startAt: "done",
+      steps: {
+        done: endStep(),
+      },
+    })
+    const parentWorkflow = defineWorkflow({
+      name: "trace-parent",
+      version: 1,
+      startAt: "child",
+      steps: {
+        child: childStep({
+          kind: "child",
+          workflow: childWorkflow.name,
+          next: "done",
+          input: () => ({ ok: true }),
+          resume: (_context, childRun) => ({
+            output: childRun.result,
+          }),
+        }),
+        done: endStep(),
+      },
+    })
+    const waitWorkflow = defineWorkflow({
+      name: "trace-wait",
+      version: 1,
+      startAt: "hold",
+      steps: {
+        hold: waitStep({
+          kind: "wait",
+          next: "done",
+          timeoutMs: 60_000,
+          open: (context) => ({
+            correlationKey: `wait:${context.run.id}:approval`,
+          }),
+          resume: () => ({}),
+        }),
+        done: endStep(),
+      },
+    })
+    const childStore = createStoreStub()
+    const childRecording = createRecordingTracer()
+    const childTracer = createHippoTracer({
+      tracer: childRecording.tracer,
+    })
+    const childEngine = createWorkflowEngine({
+      definitions: [parentWorkflow, childWorkflow, waitWorkflow],
+      metrics: createMetrics(),
+      store: childStore,
+      tracer: childTracer,
+    })
+
+    const parentRun = await childEngine.startRun({
+      workflowName: parentWorkflow.name,
+      payload: {},
+    })
+    childRecording.spans.length = 0
+    await childEngine.tick("test-worker", 5_000)
+
+    const childStartSpan = childRecording.spans.find(
+      (span) => span.name === "hippo.workflow.step.child.start"
+    )
+    const childStepSpan = childRecording.spans.find(
+      (span) => span.name === "hippo.workflow.step.execute"
+    )
+
+    expect(childStartSpan?.attributes["workflow.child.run_id"]).toBeDefined()
+    expect(childStepSpan?.attributes["workflow.child.run_id"]).toBeDefined()
+    expect(childStepSpan?.attributes["workflow.wait.correlation_key"]).toBe(
+      `child:${parentRun.id}:child`
+    )
+
+    const waitStore = createStoreStub()
+    const waitRecording = createRecordingTracer()
+    const waitTracer = createHippoTracer({
+      tracer: waitRecording.tracer,
+    })
+    const waitEngine = createWorkflowEngine({
+      definitions: [waitWorkflow],
+      metrics: createMetrics(),
+      store: waitStore,
+      tracer: waitTracer,
+    })
+
+    const waitRun = await waitEngine.startRun({
+      workflowName: waitWorkflow.name,
+      payload: {},
+    })
+    waitRecording.spans.length = 0
+    await waitEngine.tick("test-worker", 5_000)
+
+    const waitOpenSpan = waitRecording.spans.find(
+      (span) => span.name === "hippo.workflow.step.wait.open"
+    )
+
+    expect(waitOpenSpan?.attributes["workflow.wait.correlation_key"]).toBe(
+      `wait:${waitRun.id}:approval`
+    )
   })
 
   it("continues a run as new from a task step", async () => {
@@ -2056,6 +2465,224 @@ describe("workflow engine", () => {
     expect(failed?.status).toBe("failed")
   })
 
+  it("opens and resumes a human task with an approval payload", async () => {
+    const workflow = defineWorkflow({
+      name: "human-task-approve",
+      version: 1,
+      startAt: "review",
+      steps: {
+        review: humanTask({
+          next: "done",
+          transitions: {
+            timeout: "timed-out",
+          },
+          timeoutMs: 60_000,
+          open: ({ approvalUrl }) => ({
+            prompt: {
+              approvalUrl,
+            },
+          }),
+          resume: (_context, decision) => ({
+            patch: {
+              decision: decision.decision,
+              data: decision.data ?? null,
+            },
+          }),
+          timeout: {
+            transition: "timed-out",
+          },
+        }),
+        "timed-out": endStep(),
+        done: endStep(),
+      },
+    })
+    const store = createStoreStub()
+    const engine = createWorkflowEngine({
+      definitions: [workflow],
+      humanTasks: {
+        baseUrl: "http://127.0.0.1:3000",
+        secret: "human-secret",
+        toleranceSeconds: 300,
+      },
+      metrics: createMetrics(),
+      store,
+    })
+
+    const run = await engine.startRun({
+      workflowName: workflow.name,
+      payload: {},
+    })
+
+    await engine.tick("test-worker", 5_000)
+
+    const [wait] = await store.listStepWaits({ runId: run.id, stepKey: "review" })
+    expect(isHumanTaskWaitPayload(wait?.payload)).toBe(true)
+    if (!wait || !isHumanTaskWaitPayload(wait.payload)) {
+      throw new Error("expected human task wait payload")
+    }
+
+    const token = wait.payload.approvalUrl.split("/").at(-1)
+    expect(token).toBeTruthy()
+
+    const claims = verifyHumanTaskToken({
+      token: token!,
+      secret: "human-secret",
+      toleranceSeconds: 300,
+    })
+
+    expect(claims?.correlationKey).toBe(wait.correlationKey)
+
+    const resumed = await engine.resumeHumanTask({
+      correlationKey: wait.correlationKey,
+      decision: {
+        decision: "approve",
+        data: {
+          reviewer: "alice",
+        },
+      },
+    })
+    await drainEngine(engine)
+
+    const completed = await store.getRun(run.id)
+
+    expect(resumed.status).toBe("resumed")
+    expect(completed?.status).toBe("completed")
+    expect(completed?.context).toMatchObject({
+      decision: "approve",
+      data: {
+        reviewer: "alice",
+      },
+    })
+  })
+
+  it("routes rejected human tasks through their transition", async () => {
+    const workflow = defineWorkflow({
+      name: "human-task-reject",
+      version: 1,
+      startAt: "review",
+      steps: {
+        review: humanTask({
+          next: "approved",
+          timeoutMs: 60_000,
+          open: () => ({}),
+          resume: (_context, decision) => ({
+            patch: {
+              decision: decision.decision,
+            },
+            transition: decision.decision === "reject" ? "rejected" : "approved",
+          }),
+          timeout: {
+            transition: "timed-out",
+          },
+          transitions: {
+            timeout: "timed-out",
+          },
+        }),
+        approved: endStep(),
+        rejected: endStep(),
+        "timed-out": endStep(),
+      },
+    })
+    const store = createStoreStub()
+    const engine = createWorkflowEngine({
+      definitions: [workflow],
+      humanTasks: {
+        baseUrl: "http://127.0.0.1:3000",
+        secret: "human-secret",
+        toleranceSeconds: 300,
+      },
+      metrics: createMetrics(),
+      store,
+    })
+
+    const run = await engine.startRun({
+      workflowName: workflow.name,
+      payload: {},
+    })
+
+    await engine.tick("test-worker", 5_000)
+
+    const [wait] = await store.listStepWaits({ runId: run.id, stepKey: "review" })
+    if (!wait) {
+      throw new Error("expected review wait")
+    }
+
+    await engine.resumeHumanTask({
+      correlationKey: wait.correlationKey,
+      decision: {
+        decision: "reject",
+      },
+    })
+    await drainEngine(engine)
+
+    const completed = await store.getRun(run.id)
+    const resumedWaits = await store.listStepWaits({ runId: run.id, stepKey: "review" })
+
+    expect(completed?.status).toBe("completed")
+    expect(completed?.context.decision).toBe("reject")
+    expect(resumedWaits[0]?.resumePayload).toEqual({
+      decision: "reject",
+    })
+  })
+
+  it("routes timed-out human tasks through their timeout transition", async () => {
+    const workflow = defineWorkflow({
+      name: "human-task-timeout",
+      version: 1,
+      startAt: "review",
+      steps: {
+        review: humanTask({
+          next: "approved",
+          timeoutMs: 1,
+          open: () => ({}),
+          resume: (_context, decision) => ({
+            patch: {
+              decision: decision.decision,
+            },
+          }),
+          timeout: {
+            transition: "timed-out",
+            patch: {
+              timedOut: true,
+            },
+          },
+          transitions: {
+            timeout: "timed-out",
+          },
+        }),
+        approved: endStep(),
+        "timed-out": endStep(),
+      },
+    })
+    const store = createStoreStub()
+    const engine = createWorkflowEngine({
+      definitions: [workflow],
+      humanTasks: {
+        baseUrl: "http://127.0.0.1:3000",
+        secret: "human-secret",
+        toleranceSeconds: 300,
+      },
+      metrics: createMetrics(),
+      store,
+    })
+
+    const run = await engine.startRun({
+      workflowName: workflow.name,
+      payload: {},
+    })
+
+    await engine.tick("test-worker", 5_000)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    expect(await store.expireOpenWaits({ limit: 100 })).toBe(1)
+    await drainEngine(engine)
+
+    const completed = await store.getRun(run.id)
+
+    expect(completed?.status).toBe("completed")
+    expect(completed?.currentStepKey).toBeNull()
+    expect(completed?.context.timedOut).toBe(true)
+  })
+
   it("runs child workflows and resumes the parent", async () => {
     const childWorkflow = defineWorkflow({
       name: "child-unit",
@@ -2116,6 +2743,225 @@ describe("workflow engine", () => {
     expect(completedParent?.context.childStatus).toBe("completed")
     expect(childRuns).toHaveLength(1)
     expect(childRuns[0]?.status).toBe("completed")
+  })
+
+  it("runs fan-out children and resumes with ordered terminal results", async () => {
+    const childWorkflow = defineWorkflow({
+      name: "fanout-child-unit",
+      version: 1,
+      startAt: "work",
+      steps: {
+        work: taskStep({
+          kind: "task",
+          next: "done",
+          run: ({ input }) => {
+            if (input["shouldFail"] === true) {
+              throw new Error(`child-${String(input["index"])} failed`)
+            }
+
+            const index = requireNumber(input["index"], "fan-out child index")
+
+            return {
+              patch: {
+                index,
+              },
+            }
+          },
+        }),
+        done: endStep(),
+      },
+    })
+    const parentWorkflow = defineWorkflow({
+      name: "fanout-parent-unit",
+      version: 1,
+      startAt: "spread",
+      steps: {
+        spread: fanOut({
+          next: "done",
+          failureMode: "collect",
+          children: () => [
+            { workflow: childWorkflow.name, input: { index: 2 } },
+            { workflow: childWorkflow.name, input: { index: 0, shouldFail: true } },
+            { workflow: childWorkflow.name, input: { index: 1 } },
+          ],
+          resume: (_context, childRuns) => ({
+            patch: {
+              childStatuses: childRuns.map((run) => run.status),
+              childIndexes: childRuns.map((run) => run.context["index"] ?? null),
+            },
+          }),
+        }),
+        done: endStep(),
+      },
+    })
+    const store = createStoreStub()
+    const engine = createWorkflowEngine({
+      definitions: [parentWorkflow, childWorkflow],
+      metrics: createMetrics(),
+      store,
+    })
+
+    const parentRun = await engine.startRun({
+      workflowName: parentWorkflow.name,
+      payload: {},
+    })
+
+    await drainEngine(engine)
+
+    const completedParent = await store.getRun(parentRun.id)
+
+    expect(completedParent?.status).toBe("completed")
+    expect(completedParent?.context.childStatuses).toEqual([
+      "completed",
+      "failed",
+      "completed",
+    ])
+    expect(completedParent?.context.childIndexes).toEqual([2, null, 1])
+  })
+
+  it("cancels remaining fan-out children in fail-fast mode", async () => {
+    const childWorkflow = defineWorkflow({
+      name: "fanout-failfast-child",
+      version: 1,
+      startAt: "work",
+      steps: {
+        work: taskStep({
+          kind: "task",
+          next: "done",
+          run: ({ input }) => {
+            if (input["shouldFail"] === true) {
+              throw new Error("fail-fast-child")
+            }
+
+            return {
+              patch: {
+                ok: true,
+              },
+            }
+          },
+        }),
+        done: endStep(),
+      },
+    })
+    const parentWorkflow = defineWorkflow({
+      name: "fanout-failfast-parent",
+      version: 1,
+      startAt: "spread",
+      steps: {
+        spread: fanOut({
+          next: "done",
+          failureMode: "fail-fast",
+          children: () => [
+            { workflow: childWorkflow.name, input: { shouldFail: true } },
+            { workflow: childWorkflow.name, input: { shouldFail: false } },
+          ],
+          resume: (_context, childRuns) => ({
+            patch: {
+              childStatuses: childRuns.map((run) => run.status),
+            },
+          }),
+        }),
+        done: endStep(),
+      },
+    })
+    const store = createStoreStub()
+    const engine = createWorkflowEngine({
+      definitions: [parentWorkflow, childWorkflow],
+      metrics: createMetrics(),
+      store,
+    })
+
+    const parentRun = await engine.startRun({
+      workflowName: parentWorkflow.name,
+      payload: {},
+    })
+
+    await drainEngine(engine)
+
+    const completedParent = await store.getRun(parentRun.id)
+    const childRuns = await store.listChildRuns(parentRun.id)
+
+    expect(completedParent?.status).toBe("completed")
+    expect(completedParent?.context.childStatuses).toEqual(["failed", "canceled"])
+    expect(childRuns.map((run) => run.status)).toEqual(["failed", "canceled"])
+  })
+
+  it("surfaces timed-out fan-out children to the join", async () => {
+    const hangingChildWorkflow = defineWorkflow({
+      name: "fanout-timeout-child",
+      version: 1,
+      startAt: "hold",
+      steps: {
+        hold: waitStep({
+          kind: "wait",
+          next: "done",
+          timeoutMs: 60_000,
+          open: (context) => ({
+            correlationKey: `child-hold:${context.run.id}`,
+          }),
+          resume: () => ({}),
+        }),
+        done: endStep(),
+      },
+    })
+    const fastChildWorkflow = defineWorkflow({
+      name: "fanout-timeout-fast-child",
+      version: 1,
+      startAt: "done",
+      steps: {
+        done: endStep(),
+      },
+    })
+    const parentWorkflow = defineWorkflow({
+      name: "fanout-timeout-parent",
+      version: 1,
+      startAt: "spread",
+      steps: {
+        spread: fanOut({
+          next: "done",
+          timeoutMs: 1,
+          join: {
+            kind: "all",
+          },
+          children: () => [
+            { workflow: fastChildWorkflow.name, input: { index: 0 } },
+            { workflow: fastChildWorkflow.name, input: { index: 1 } },
+            { workflow: hangingChildWorkflow.name, input: { index: 2 } },
+          ],
+          resume: (_context, childRuns) => ({
+            patch: {
+              childStatuses: childRuns.map((run) => run.status),
+            },
+          }),
+        }),
+        done: endStep(),
+      },
+    })
+    const store = createStoreStub()
+    const engine = createWorkflowEngine({
+      definitions: [parentWorkflow, fastChildWorkflow, hangingChildWorkflow],
+      metrics: createMetrics(),
+      store,
+    })
+
+    const parentRun = await engine.startRun({
+      workflowName: parentWorkflow.name,
+      payload: {},
+    })
+
+    await drainEngine(engine)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    expect(await store.expireOpenWaits({ limit: 100 })).toBeGreaterThan(0)
+    await drainEngine(engine)
+
+    const completedParent = await store.getRun(parentRun.id)
+
+    expect(completedParent?.status).toBe("completed")
+    expect(completedParent?.context.childStatuses).toEqual([
+      "completed",
+      "completed",
+      "canceled",
+    ])
   })
 
   it("compensates completed steps when a run fails", async () => {

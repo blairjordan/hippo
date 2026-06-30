@@ -148,6 +148,21 @@ export type WaitStepResumeResult = {
   output?: JsonValue
 }
 
+export type HumanTaskDecision = {
+  decision: "approve" | "reject"
+  data?: JsonValue
+}
+
+export type HumanTaskOpenResult = {
+  prompt?: JsonValue
+}
+
+export type HumanTaskTimeoutResult = {
+  patch?: JsonObject
+  transition?: string
+  output?: JsonValue
+}
+
 export type SignalRecord = {
   id: string
   runId: string
@@ -269,11 +284,42 @@ export type SignalStepDefinition = {
   ) => Promise<WaitStepResumeResult> | WaitStepResumeResult
 }
 
+export type HumanTaskStepDefinition = {
+  kind: "humanTask"
+  label?: string
+  next?: string
+  transitions?: Record<string, string>
+  timeoutMs: number
+  open: (
+    context: StepExecutionContext & {
+      approvalToken: string
+      approvalUrl: string
+      formUrl: string
+    }
+  ) => Promise<HumanTaskOpenResult> | HumanTaskOpenResult
+  resume: (
+    context: StepExecutionContext,
+    decision: HumanTaskDecision
+  ) => Promise<WaitStepResumeResult> | WaitStepResumeResult
+  timeout: HumanTaskTimeoutResult
+}
+
 export type ChildStepResult = {
   patch?: JsonObject
   transition?: string
   output?: JsonValue
 }
+
+export type FanOutChildInput = {
+  workflow: string
+  input: JsonObject
+}
+
+export type FanOutJoin =
+  | { kind: "all" }
+  | { kind: "quorum"; count: number }
+
+export type FanOutFailureMode = "collect" | "fail-fast"
 
 export type ChildStepDefinition = {
   kind: "child"
@@ -287,6 +333,23 @@ export type ChildStepDefinition = {
   resume: (
     context: StepExecutionContext,
     childRun: WorkflowRunRecord
+  ) => Promise<ChildStepResult> | ChildStepResult
+}
+
+export type FanOutStepDefinition = {
+  kind: "fanOut"
+  label?: string
+  next?: string
+  transitions?: Record<string, string>
+  timeoutMs?: number
+  join?: FanOutJoin
+  failureMode?: FanOutFailureMode
+  children: (
+    context: StepExecutionContext
+  ) => Promise<FanOutChildInput[]> | FanOutChildInput[]
+  resume: (
+    context: StepExecutionContext,
+    childRuns: WorkflowRunRecord[]
   ) => Promise<ChildStepResult> | ChildStepResult
 }
 
@@ -337,7 +400,9 @@ export type WorkflowStepDefinition =
   | TaskStepDefinition
   | WaitStepDefinition
   | SignalStepDefinition
+  | HumanTaskStepDefinition
   | ChildStepDefinition
+  | FanOutStepDefinition
   | SleepStepDefinition
   | EndStepDefinition
   | ExternalSessionStepDefinition

@@ -30,6 +30,9 @@ describe("worker loop", () => {
       async resumeWait() {
         throw new Error("not used")
       },
+      async resumeHumanTask() {
+        throw new Error("not used")
+      },
       async resumeExternalSession() {
         throw new Error("not used")
       },

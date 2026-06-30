@@ -7,10 +7,14 @@ import {
   waitForPort,
 } from "../src/lib/dev-cli.js"
 
-const runStep = (args: { command: string; args: string[] }) =>
+const runStep = (args: {
+  command: string
+  args: string[]
+  env?: Record<string, string>
+}) =>
   new Promise<void>((resolve, reject) => {
     const child = spawn(args.command, args.args, {
-      env: process.env,
+      env: { ...process.env, ...(args.env ?? {}) },
       stdio: "inherit",
     })
 
@@ -31,10 +35,14 @@ const runStep = (args: { command: string; args: string[] }) =>
     })
   })
 
-const runServeStep = (args: { command: string; args: string[] }) =>
+const runServeStep = (args: {
+  command: string
+  args: string[]
+  env?: Record<string, string>
+}) =>
   new Promise<void>((resolve, reject) => {
     const child = spawn(args.command, args.args, {
-      env: process.env,
+      env: { ...process.env, ...(args.env ?? {}) },
       stdio: "inherit",
     })
 

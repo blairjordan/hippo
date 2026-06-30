@@ -6,7 +6,9 @@ import { describe, expect, it, beforeAll } from "vitest"
 
 import {
   createHippoTracer,
+  getOtelBootstrapConfig,
   getActiveTraceContext,
+  registerOtelFromEnv,
   withTraceContext,
 } from "./tracing.js"
 
@@ -54,5 +56,42 @@ describe("OTel trace context propagation", () => {
         })
       })
     })
+  })
+
+  it("parses env-driven OTLP bootstrap config", () => {
+    expect(
+      getOtelBootstrapConfig({
+        HIPPO_ENV: "prod",
+        OTEL_EXPORTER_OTLP_ENDPOINT: "https://api.honeycomb.io/v1/traces",
+        OTEL_EXPORTER_OTLP_HEADERS:
+          "x-honeycomb-team=test-key,x-honeycomb-dataset=hippo-prod",
+        OTEL_RESOURCE_ATTRIBUTES: "service.namespace=hippo,service.version=0.1.0",
+        OTEL_SERVICE_NAME: "hippo-api",
+      })
+    ).toEqual({
+      endpoint: "https://api.honeycomb.io/v1/traces",
+      headers: {
+        "x-honeycomb-dataset": "hippo-prod",
+        "x-honeycomb-team": "test-key",
+      },
+      resourceAttributes: {
+        "deployment.environment": "prod",
+        "service.name": "hippo-api",
+        "service.namespace": "hippo",
+        "service.version": "0.1.0",
+      },
+      serviceName: "hippo-api",
+    })
+  })
+
+  it("skips OTLP bootstrap when disabled", async () => {
+    const shutdown = registerOtelFromEnv({
+      env: {
+        OTEL_SDK_DISABLED: "true",
+        OTEL_EXPORTER_OTLP_ENDPOINT: "https://api.honeycomb.io/v1/traces",
+      },
+    })
+
+    await expect(shutdown()).resolves.toBeUndefined()
   })
 })

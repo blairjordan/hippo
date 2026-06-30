@@ -36,6 +36,19 @@ describe("config", () => {
       },
       async () => {
         expect(getConfig().HIPPO_ENV).toBe("dev")
+        expect(getConfig().HIPPO_ROLE).toBe("all")
+      }
+    )
+  })
+
+  it("parses explicit process roles", async () => {
+    await withEnv(
+      {
+        DATABASE_URL: "postgres://postgres:postgres@127.0.0.1:55432/hippo",
+        HIPPO_ROLE: "work",
+      },
+      async () => {
+        expect(getConfig().HIPPO_ROLE).toBe("work")
       }
     )
   })

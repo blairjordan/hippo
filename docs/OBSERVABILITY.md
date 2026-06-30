@@ -1,61 +1,92 @@
 # Observability and OpenTelemetry Tracing
 
-Hippo is instrumented with **OpenTelemetry (OTel)** tracing to provide end-to-end visibility into workflow definition executions, worker polls, run dispatch loops, and child run boundaries.
+Hippo emits nested OpenTelemetry spans for HTTP requests, worker ticks, step execution, wait resumes, child workflows, scheduler passes, recovery, and outbox delivery. Trace context is persisted on runs and step attempts so a resumed run continues the original trace tree instead of starting over.
 
----
+## Useful Span Attributes
 
-## Architecture Overview
+Hippo step spans now carry stable attributes that are easy to filter on in production:
 
-Observability in Hippo uses W3C standard traceparent propagation, preserving tracing context across asynchronous boundaries (like queues, database state machines, and task worker dispatches).
+- `workflow.attempt.number`
+- `workflow.retry.count`
+- `workflow.task_queue`
+- `workflow.priority`
+- `workflow.child.run_id`
+- `workflow.wait.correlation_key`
 
-```mermaid
-graph TD
-    A[Start Run request / REST API] -->|Traced under parent span| B[Database workflow_runs]
-    B -->|Persisted with trace_context| C[Worker Loop]
-    C -->|Claims run via claimNextRunnableRun| D[Worker Step Execution]
-    D -->|Restores trace_context| E[executeTaskStep / childStep]
-    E -->|Saves trace_context| F[Database workflow_step_attempts]
+You will also see the standard Hippo dimensions already used elsewhere:
+
+- `workflow.name`
+- `workflow.version`
+- `workflow.run.id`
+- `workflow.step.key`
+- `workflow.step.kind`
+- `workflow.worker.id`
+
+## Honeycomb Wiring
+
+Hippo can bootstrap OTLP exporting directly from environment variables. The runtime enables OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
+
+Exact env combo for Honeycomb:
+
+```bash
+export HIPPO_ENV=prod
+export OTEL_SERVICE_NAME=hippo-api
+export OTEL_EXPORTER_OTLP_ENDPOINT=https://api.honeycomb.io/v1/traces
+export OTEL_EXPORTER_OTLP_HEADERS="x-honeycomb-team=$HONEYCOMB_API_KEY,x-honeycomb-dataset=hippo-prod"
+export OTEL_RESOURCE_ATTRIBUTES="service.namespace=hippo,service.version=0.1.0"
 ```
 
----
+With that in place, starting Hippo normally is enough:
+
+```bash
+HIPPO_ROLE=all npm run start
+```
+
+The runtime wiring lives in [src/lib/tracing.ts](/home/blair/code/devmode/hippo/src/lib/tracing.ts:1) and is activated from [src/lib/process-runtime.ts](/home/blair/code/devmode/hippo/src/lib/process-runtime.ts:1).
+
+## Runnable Snippet
+
+A minimal bootstrap example is checked in at [examples/workflows-demo/src/honeycomb.ts](/home/blair/code/devmode/hippo/examples/workflows-demo/src/honeycomb.ts:1).
+
+Run it with:
+
+```bash
+npx tsx examples/workflows-demo/src/honeycomb.ts
+```
 
 ## Trace Context Propagation
 
-### 1. Database Schema
-Every workflow execution and step execution stores trace information in the database:
-- `workflow_runs.trace_context`: Holds the W3C traceparent string of the span that started the run.
-- `workflow_step_attempts.trace_context`: Holds the W3C traceparent of the execution block that ran the task attempt.
+Hippo stores W3C trace context in durable state:
 
-### 2. Context Restoring / Propagation API
-Hippo provides helpers in [tracing.ts](file:///home/blair/code/devmode/hippo/src/lib/tracing.ts) to manage trace context boundaries programmatically:
-- `getActiveTraceContext()`: Extracts the current active W3C traceparent context.
-- `withTraceContext(traceparent, callback)`: Executes the callback block inside the trace context specified by `traceparent`.
+- `workflow_runs.trace_context`
+- `workflow_step_attempts.trace_context`
 
----
+Use the helpers in [src/lib/tracing.ts](/home/blair/code/devmode/hippo/src/lib/tracing.ts:1) when you need to cross an async boundary yourself:
 
-## Custom Instrumentation Guidelines
+```ts
+import {
+  createHippoTracer,
+  getActiveTraceContext,
+  withTraceContext,
+} from "./lib/tracing.js"
 
-To add custom tracing inside workflows, steps, or custom worker loops, use the Hippo Tracer:
+const tracer = createHippoTracer({ scopeName: "my-service" })
 
-```typescript
-import { createHippoTracer, getActiveTraceContext, withTraceContext } from "./lib/tracing.js"
+await tracer.withSpan(
+  {
+    name: "custom-span",
+    attributes: {
+      "custom.key": "value",
+    },
+  },
+  async (span) => {
+    span.addEvent("before-handoff")
 
-const tracer = createHippoTracer({ scopeName: "my-custom-service" })
+    const traceparent = getActiveTraceContext()
 
-// Creating spans
-await tracer.withSpan({ name: "my-span-name", attributes: { "custom.key": "value" } }, async (span) => {
-  span.addEvent("something_happened", { details: "some details" })
-  // Nested async operations will automatically carry the trace ID
-})
+    await withTraceContext(traceparent, async () => {
+      await tracer.withSpan({ name: "resumed-work" }, async () => undefined)
+    })
+  }
+)
 ```
-
-### Propagating context manually
-When dispatching message queues or executing async background jobs:
-1. Capture the traceparent: `const traceparent = getActiveTraceContext()`
-2. Send `traceparent` as metadata.
-3. In the worker receiving the message, restore it:
-   ```typescript
-   await withTraceContext(traceparent, async () => {
-     // Spans created here will link back to the original publisher trace
-   })
-   ```

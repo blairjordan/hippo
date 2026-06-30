@@ -1,12 +1,12 @@
 # Deploying Hippo
 
-Hippo currently runs as a single Node process that starts the API server, worker loop, recovery loop, scheduler, and outbox drain together.
+Hippo supports three runtime roles through `HIPPO_ROLE`:
 
-That means the deploy story today is:
+- `all` starts the API server, dashboard, worker loop, recovery loop, scheduler, and outbox drain in one process.
+- `serve` starts only the API server and dashboard.
+- `work` starts only the worker loop, recovery loop, scheduler, and outbox drain.
 
-- single container or single service per environment
-- shared Postgres for durable state
-- horizontal scale is possible, but each instance also serves HTTP
+`HIPPO_ROLE=all` is the default, so single-process deploys still work unchanged.
 
 ## Environment Matrix
 
@@ -16,8 +16,10 @@ Use the same application code in every environment and switch behavior only with
 | --- | --- | --- | --- | --- |
 | `DATABASE_URL` | required | required | required | Postgres connection |
 | `HIPPO_ENV` | `dev` | `staging` | `prod` | auth strictness and environment mode |
+| `HIPPO_ROLE` | `all` | `all`, `serve`, or `work` | `all`, `serve`, or `work` | process role selection |
 | `HIPPO_HOST` | `127.0.0.1` | `0.0.0.0` | `0.0.0.0` | bind address |
 | `HIPPO_PORT` | `3000` | `3000` | `3000` | HTTP port |
+| `HIPPO_PUBLIC_BASE_URL` | optional | recommended | recommended | external base URL for signed human-task approval links |
 | `HIPPO_TASK_QUEUES` | `default` | `default` | `default` | comma-separated worker queue subscriptions |
 | `HIPPO_API_TOKEN` | optional | required | required | operator and API auth |
 | `HIPPO_CALLBACK_SECRET` | optional | required | required | callback verification |
@@ -42,9 +44,25 @@ docker run --rm -p 3000:3000 \
 
 The image compiles TypeScript during build and runs `npm run start` in production.
 
+Single container:
+
+```bash
+docker run --rm -p 3000:3000 \
+  -e HIPPO_ROLE=all \
+  --env-file .env.prod.example \
+  hippo
+```
+
+Split API and worker containers from the same image:
+
+```bash
+docker run --rm -p 3000:3000 -e HIPPO_ROLE=serve --env-file .env.prod.example hippo
+docker run --rm -e HIPPO_ROLE=work --env-file .env.prod.example hippo
+```
+
 ## Fly.io
 
-`fly.toml` is included for a basic single-service deployment.
+`fly.toml` keeps the default single-process shape with `HIPPO_ROLE=all`.
 
 Before first deploy:
 
@@ -53,6 +71,8 @@ fly launch --copy-config --no-deploy
 fly secrets set DATABASE_URL=... HIPPO_API_TOKEN=... HIPPO_CALLBACK_SECRET=...
 fly deploy
 ```
+
+To split roles on Fly, run the same image under separate process groups and override `HIPPO_ROLE` per process group.
 
 ## Railway
 
@@ -75,6 +95,7 @@ Create the service from the repo, then set:
 - `HIPPO_API_TOKEN`
 - `HIPPO_CALLBACK_SECRET`
 
-## Current Limits
+## Recommended Shapes
 
-The process model has not yet been split into dedicated `server` and `worker` commands. Until that lands, the supported production shape is one service type that runs both in the same process.
+- Small installs: one `HIPPO_ROLE=all` process.
+- Larger installs: one or more `HIPPO_ROLE=serve` processes behind HTTP plus one or more `HIPPO_ROLE=work` processes for background throughput.

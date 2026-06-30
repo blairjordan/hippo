@@ -9,10 +9,13 @@ import type { WorkflowEngine } from "./lib/workflow-engine.js"
 import type { WorkflowStore } from "./lib/workflow-store.js"
 import { createHealthRoutes } from "./routes/health.js"
 import { createMetricsRoutes } from "./routes/metrics.js"
+import { createHumanTaskRoutes } from "./routes/human-tasks.js"
 import { createWorkflowRoutes } from "./routes/workflows.js"
 
 export const createApp = (args: {
   auth: HippoAuth
+  callbackSecret?: string
+  callbackToleranceSeconds?: number
   engine: WorkflowEngine
   externalHeartbeatLeaseMs?: number
   listenForNotifications?: (
@@ -30,6 +33,16 @@ export const createApp = (args: {
   void app.register(sensible)
   void app.register(createHealthRoutes(args.store.ping))
   void app.register(createMetricsRoutes(args.metrics, args.auth.verifyApiRequest))
+  void app.register(
+    createHumanTaskRoutes({
+      callbackToleranceSeconds: args.callbackToleranceSeconds ?? 300,
+      engine: args.engine,
+      tracer,
+      ...(args.callbackSecret === undefined
+        ? {}
+        : { callbackSecret: args.callbackSecret }),
+    })
+  )
   void app.register(
     createWorkflowRoutes({
       auth: args.auth,

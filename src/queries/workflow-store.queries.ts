@@ -1485,6 +1485,143 @@ const openWaitIR: any = {"usedParamSet":{"stepKey":true,"context":true,"runId":t
 export const openWait = new PreparedQuery<IOpenWaitParams,IOpenWaitResult>(openWaitIR);
 
 
+/** 'OpenFanOutWaits' parameters type */
+export interface IOpenFanOutWaitsParams {
+  attemptId?: string | null | void;
+  context?: Json | null | void;
+  eventPayload?: Json | null | void;
+  eventType?: string | null | void;
+  output?: Json | null | void;
+  runId?: string | null | void;
+  stepKey?: string | null | void;
+  waits?: Json | null | void;
+  workerId?: string | null | void;
+}
+
+/** 'OpenFanOutWaits' return type */
+export interface IOpenFanOutWaitsResult {
+  availableAt: Date;
+  branchedFromAttemptId: string | null;
+  branchedFromAttemptRunId: string | null;
+  branchedFromRunId: string | null;
+  completedAt: Date | null;
+  context: Json;
+  continuedFromRunId: string | null;
+  createdAt: Date;
+  currentStepKey: string | null;
+  definitionName: string;
+  definitionVersion: number;
+  error: Json | null;
+  id: string;
+  input: Json;
+  leaseExpiresAt: Date | null;
+  leaseOwner: string | null;
+  parentRunId: string | null;
+  parentStepKey: string | null;
+  priority: number;
+  result: Json | null;
+  status: workflow_run_status;
+  supersededByRunId: string | null;
+  taskQueue: string;
+  updatedAt: Date;
+}
+
+/** 'OpenFanOutWaits' query type */
+export interface IOpenFanOutWaitsQuery {
+  params: IOpenFanOutWaitsParams;
+  result: IOpenFanOutWaitsResult;
+}
+
+const openFanOutWaitsIR: any = {"usedParamSet":{"stepKey":true,"context":true,"runId":true,"workerId":true,"waits":true,"output":true,"attemptId":true,"eventType":true,"eventPayload":true},"params":[{"name":"stepKey","required":false,"transform":{"type":"scalar"},"locs":[{"a":98,"b":105},{"a":318,"b":325},{"a":1377,"b":1384},{"a":2015,"b":2022}]},{"name":"context","required":false,"transform":{"type":"scalar"},"locs":[{"a":122,"b":129}]},{"name":"runId","required":false,"transform":{"type":"scalar"},"locs":[{"a":284,"b":289}]},{"name":"workerId","required":false,"transform":{"type":"scalar"},"locs":[{"a":349,"b":357}]},{"name":"waits","required":false,"transform":{"type":"scalar"},"locs":[{"a":1540,"b":1545}]},{"name":"output","required":false,"transform":{"type":"scalar"},"locs":[{"a":1747,"b":1753}]},{"name":"attemptId","required":false,"transform":{"type":"scalar"},"locs":[{"a":1836,"b":1845}]},{"name":"eventType","required":false,"transform":{"type":"scalar"},"locs":[{"a":2025,"b":2034}]},{"name":"eventPayload","required":false,"transform":{"type":"scalar"},"locs":[{"a":2037,"b":2049}]}],"statement":"WITH updated_run AS (\n  UPDATE workflow_runs\n  SET\n    status = 'waiting',\n    current_step_key = :stepKey,\n    context = :context,\n    result = NULL,\n    error = NULL,\n    lease_owner = NULL,\n    lease_expires_at = NULL,\n    available_at = now(),\n    updated_at = now()\n  WHERE id = :runId\n    AND current_step_key = :stepKey\n    AND lease_owner = :workerId\n    AND lease_expires_at >= now()\n  RETURNING\n    id,\n    parent_run_id AS \"parentRunId\",\n    parent_step_key AS \"parentStepKey\",\n    continued_from_run_id AS \"continuedFromRunId\",\n    branched_from_run_id AS \"branchedFromRunId\",\n    branched_from_attempt_run_id AS \"branchedFromAttemptRunId\",\n    branched_from_attempt_id AS \"branchedFromAttemptId\",\n    superseded_by_run_id AS \"supersededByRunId\",\n    definition_name AS \"definitionName\",\n    definition_version AS \"definitionVersion\",\n    task_queue AS \"taskQueue\",\n    priority,\n    status,\n    current_step_key AS \"currentStepKey\",\n    input,\n    context,\n    result,\n    error,\n    lease_owner AS \"leaseOwner\",\n    lease_expires_at AS \"leaseExpiresAt\",\n    available_at AS \"availableAt\",\n    created_at AS \"createdAt\",\n    updated_at AS \"updatedAt\",\n    completed_at AS \"completedAt\"\n), inserted_waits AS (\n  INSERT INTO workflow_waits (\n    run_id,\n    step_key,\n    correlation_key,\n    status,\n    payload,\n    expires_at\n  )\n  SELECT\n    updated_run.id,\n    :stepKey,\n    wait_entry.correlation_key,\n    'open',\n    wait_entry.payload,\n    wait_entry.expires_at\n  FROM updated_run\n  CROSS JOIN LATERAL jsonb_to_recordset(:waits::jsonb) AS wait_entry(\n    correlation_key text,\n    payload jsonb,\n    expires_at timestamptz\n  )\n), updated_attempt AS (\n  UPDATE workflow_step_attempts\n  SET\n    status = 'completed',\n    output = :output,\n    error = NULL,\n    completed_at = now(),\n    updated_at = now()\n  WHERE id = :attemptId\n    AND run_id IN (SELECT id FROM updated_run)\n  RETURNING id\n), inserted_event AS (\n  INSERT INTO workflow_events (run_id, step_key, event_type, payload)\n  SELECT id, :stepKey, :eventType, :eventPayload\n  FROM updated_run\n)\nSELECT * FROM updated_run"};
+
+/**
+ * Query generated from SQL:
+ * ```
+ * WITH updated_run AS (
+ *   UPDATE workflow_runs
+ *   SET
+ *     status = 'waiting',
+ *     current_step_key = :stepKey,
+ *     context = :context,
+ *     result = NULL,
+ *     error = NULL,
+ *     lease_owner = NULL,
+ *     lease_expires_at = NULL,
+ *     available_at = now(),
+ *     updated_at = now()
+ *   WHERE id = :runId
+ *     AND current_step_key = :stepKey
+ *     AND lease_owner = :workerId
+ *     AND lease_expires_at >= now()
+ *   RETURNING
+ *     id,
+ *     parent_run_id AS "parentRunId",
+ *     parent_step_key AS "parentStepKey",
+ *     continued_from_run_id AS "continuedFromRunId",
+ *     branched_from_run_id AS "branchedFromRunId",
+ *     branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+ *     branched_from_attempt_id AS "branchedFromAttemptId",
+ *     superseded_by_run_id AS "supersededByRunId",
+ *     definition_name AS "definitionName",
+ *     definition_version AS "definitionVersion",
+ *     task_queue AS "taskQueue",
+ *     priority,
+ *     status,
+ *     current_step_key AS "currentStepKey",
+ *     input,
+ *     context,
+ *     result,
+ *     error,
+ *     lease_owner AS "leaseOwner",
+ *     lease_expires_at AS "leaseExpiresAt",
+ *     available_at AS "availableAt",
+ *     created_at AS "createdAt",
+ *     updated_at AS "updatedAt",
+ *     completed_at AS "completedAt"
+ * ), inserted_waits AS (
+ *   INSERT INTO workflow_waits (
+ *     run_id,
+ *     step_key,
+ *     correlation_key,
+ *     status,
+ *     payload,
+ *     expires_at
+ *   )
+ *   SELECT
+ *     updated_run.id,
+ *     :stepKey,
+ *     wait_entry.correlation_key,
+ *     'open',
+ *     wait_entry.payload,
+ *     wait_entry.expires_at
+ *   FROM updated_run
+ *   CROSS JOIN LATERAL jsonb_to_recordset(:waits::jsonb) AS wait_entry(
+ *     correlation_key text,
+ *     payload jsonb,
+ *     expires_at timestamptz
+ *   )
+ * ), updated_attempt AS (
+ *   UPDATE workflow_step_attempts
+ *   SET
+ *     status = 'completed',
+ *     output = :output,
+ *     error = NULL,
+ *     completed_at = now(),
+ *     updated_at = now()
+ *   WHERE id = :attemptId
+ *     AND run_id IN (SELECT id FROM updated_run)
+ *   RETURNING id
+ * ), inserted_event AS (
+ *   INSERT INTO workflow_events (run_id, step_key, event_type, payload)
+ *   SELECT id, :stepKey, :eventType, :eventPayload
+ *   FROM updated_run
+ * )
+ * SELECT * FROM updated_run
+ * ```
+ */
+export const openFanOutWaits = new PreparedQuery<IOpenFanOutWaitsParams,IOpenFanOutWaitsResult>(openFanOutWaitsIR);
+
+
 /** 'ScheduleRetry' parameters type */
 export interface IScheduleRetryParams {
   attemptId?: string | null | void;
@@ -2062,6 +2199,118 @@ const completeWaitResumeIR: any = {"usedParamSet":{"resumePayload":true,"output"
 export const completeWaitResume = new PreparedQuery<ICompleteWaitResumeParams,ICompleteWaitResumeResult>(completeWaitResumeIR);
 
 
+/** 'CompleteExpiredWaitTransition' parameters type */
+export interface ICompleteExpiredWaitTransitionParams {
+  context?: Json | null | void;
+  eventPayload?: Json | null | void;
+  eventType?: string | null | void;
+  nextStepKey?: string | null | void;
+  output?: Json | null | void;
+  runId?: string | null | void;
+  stepKey?: string | null | void;
+  waitId?: string | null | void;
+}
+
+/** 'CompleteExpiredWaitTransition' return type */
+export interface ICompleteExpiredWaitTransitionResult {
+  availableAt: Date;
+  branchedFromAttemptId: string | null;
+  branchedFromAttemptRunId: string | null;
+  branchedFromRunId: string | null;
+  completedAt: Date | null;
+  context: Json;
+  continuedFromRunId: string | null;
+  createdAt: Date;
+  currentStepKey: string | null;
+  definitionName: string;
+  definitionVersion: number;
+  error: Json | null;
+  id: string;
+  input: Json;
+  leaseExpiresAt: Date | null;
+  leaseOwner: string | null;
+  parentRunId: string | null;
+  parentStepKey: string | null;
+  priority: number;
+  result: Json | null;
+  status: workflow_run_status;
+  supersededByRunId: string | null;
+  taskQueue: string;
+  updatedAt: Date;
+}
+
+/** 'CompleteExpiredWaitTransition' query type */
+export interface ICompleteExpiredWaitTransitionQuery {
+  params: ICompleteExpiredWaitTransitionParams;
+  result: ICompleteExpiredWaitTransitionResult;
+}
+
+const completeExpiredWaitTransitionIR: any = {"usedParamSet":{"nextStepKey":true,"context":true,"output":true,"runId":true,"stepKey":true,"waitId":true,"eventType":true,"eventPayload":true},"params":[{"name":"nextStepKey","required":false,"transform":{"type":"scalar"},"locs":[{"a":97,"b":108}]},{"name":"context","required":false,"transform":{"type":"scalar"},"locs":[{"a":125,"b":132}]},{"name":"output","required":false,"transform":{"type":"scalar"},"locs":[{"a":148,"b":154},{"a":1237,"b":1243}]},{"name":"runId","required":false,"transform":{"type":"scalar"},"locs":[{"a":290,"b":295}]},{"name":"stepKey","required":false,"transform":{"type":"scalar"},"locs":[{"a":351,"b":358},{"a":1481,"b":1488}]},{"name":"waitId","required":false,"transform":{"type":"scalar"},"locs":[{"a":1282,"b":1288}]},{"name":"eventType","required":false,"transform":{"type":"scalar"},"locs":[{"a":1491,"b":1500}]},{"name":"eventPayload","required":false,"transform":{"type":"scalar"},"locs":[{"a":1503,"b":1515}]}],"statement":"WITH updated_run AS (\n  UPDATE workflow_runs\n  SET\n    status = 'queued',\n    current_step_key = :nextStepKey,\n    context = :context,\n    result = :output,\n    error = NULL,\n    lease_owner = NULL,\n    lease_expires_at = NULL,\n    available_at = now(),\n    updated_at = now()\n  WHERE id = :runId\n    AND status = 'waiting'\n    AND current_step_key = :stepKey\n  RETURNING\n    id,\n    parent_run_id AS \"parentRunId\",\n    parent_step_key AS \"parentStepKey\",\n    continued_from_run_id AS \"continuedFromRunId\",\n    branched_from_run_id AS \"branchedFromRunId\",\n    branched_from_attempt_run_id AS \"branchedFromAttemptRunId\",\n    branched_from_attempt_id AS \"branchedFromAttemptId\",\n    superseded_by_run_id AS \"supersededByRunId\",\n    definition_name AS \"definitionName\",\n    definition_version AS \"definitionVersion\",\n    task_queue AS \"taskQueue\",\n    priority,\n    status,\n    current_step_key AS \"currentStepKey\",\n    input,\n    context,\n    result,\n    error,\n    lease_owner AS \"leaseOwner\",\n    lease_expires_at AS \"leaseExpiresAt\",\n    available_at AS \"availableAt\",\n    created_at AS \"createdAt\",\n    updated_at AS \"updatedAt\",\n    completed_at AS \"completedAt\"\n), updated_wait AS (\n  UPDATE workflow_waits\n  SET\n    resume_output = :output,\n    updated_at = now()\n  WHERE id = :waitId\n    AND status = 'expired'\n    AND EXISTS (SELECT 1 FROM updated_run)\n  RETURNING id\n), inserted_event AS (\n  INSERT INTO workflow_events (run_id, step_key, event_type, payload)\n  SELECT id, :stepKey, :eventType, :eventPayload\n  FROM updated_run\n  WHERE EXISTS (SELECT 1 FROM updated_wait)\n)\nSELECT * FROM updated_run"};
+
+/**
+ * Query generated from SQL:
+ * ```
+ * WITH updated_run AS (
+ *   UPDATE workflow_runs
+ *   SET
+ *     status = 'queued',
+ *     current_step_key = :nextStepKey,
+ *     context = :context,
+ *     result = :output,
+ *     error = NULL,
+ *     lease_owner = NULL,
+ *     lease_expires_at = NULL,
+ *     available_at = now(),
+ *     updated_at = now()
+ *   WHERE id = :runId
+ *     AND status = 'waiting'
+ *     AND current_step_key = :stepKey
+ *   RETURNING
+ *     id,
+ *     parent_run_id AS "parentRunId",
+ *     parent_step_key AS "parentStepKey",
+ *     continued_from_run_id AS "continuedFromRunId",
+ *     branched_from_run_id AS "branchedFromRunId",
+ *     branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+ *     branched_from_attempt_id AS "branchedFromAttemptId",
+ *     superseded_by_run_id AS "supersededByRunId",
+ *     definition_name AS "definitionName",
+ *     definition_version AS "definitionVersion",
+ *     task_queue AS "taskQueue",
+ *     priority,
+ *     status,
+ *     current_step_key AS "currentStepKey",
+ *     input,
+ *     context,
+ *     result,
+ *     error,
+ *     lease_owner AS "leaseOwner",
+ *     lease_expires_at AS "leaseExpiresAt",
+ *     available_at AS "availableAt",
+ *     created_at AS "createdAt",
+ *     updated_at AS "updatedAt",
+ *     completed_at AS "completedAt"
+ * ), updated_wait AS (
+ *   UPDATE workflow_waits
+ *   SET
+ *     resume_output = :output,
+ *     updated_at = now()
+ *   WHERE id = :waitId
+ *     AND status = 'expired'
+ *     AND EXISTS (SELECT 1 FROM updated_run)
+ *   RETURNING id
+ * ), inserted_event AS (
+ *   INSERT INTO workflow_events (run_id, step_key, event_type, payload)
+ *   SELECT id, :stepKey, :eventType, :eventPayload
+ *   FROM updated_run
+ *   WHERE EXISTS (SELECT 1 FROM updated_wait)
+ * )
+ * SELECT * FROM updated_run
+ * ```
+ */
+export const completeExpiredWaitTransition = new PreparedQuery<ICompleteExpiredWaitTransitionParams,ICompleteExpiredWaitTransitionResult>(completeExpiredWaitTransitionIR);
+
+
 /** 'ExtendLease' parameters type */
 export interface IExtendLeaseParams {
   attemptId?: string | null | void;
@@ -2244,6 +2493,65 @@ const listOpenExternalSessionsIR: any = {"usedParamSet":{"runId":true},"params":
  * ```
  */
 export const listOpenExternalSessions = new PreparedQuery<IListOpenExternalSessionsParams,IListOpenExternalSessionsResult>(listOpenExternalSessionsIR);
+
+
+/** 'ListStepWaits' parameters type */
+export interface IListStepWaitsParams {
+  runId?: string | null | void;
+  stepKey?: string | null | void;
+}
+
+/** 'ListStepWaits' return type */
+export interface IListStepWaitsResult {
+  correlationKey: string;
+  createdAt: Date;
+  expiresAt: Date | null;
+  externalSessionId: string | null;
+  externalSessionKind: string | null;
+  id: string;
+  payload: Json | null;
+  resumedAt: Date | null;
+  resumeOutput: Json | null;
+  resumePayload: Json | null;
+  runId: string;
+  status: workflow_wait_status;
+  stepKey: string;
+  updatedAt: Date;
+}
+
+/** 'ListStepWaits' query type */
+export interface IListStepWaitsQuery {
+  params: IListStepWaitsParams;
+  result: IListStepWaitsResult;
+}
+
+const listStepWaitsIR: any = {"usedParamSet":{"runId":true,"stepKey":true},"params":[{"name":"runId","required":false,"transform":{"type":"scalar"},"locs":[{"a":437,"b":442}]},{"name":"stepKey","required":false,"transform":{"type":"scalar"},"locs":[{"a":461,"b":468}]}],"statement":"SELECT\n  id,\n  run_id AS \"runId\",\n  step_key AS \"stepKey\",\n  correlation_key AS \"correlationKey\",\n  status,\n  payload,\n  resume_payload AS \"resumePayload\",\n  resume_output AS \"resumeOutput\",\n  expires_at AS \"expiresAt\",\n  created_at AS \"createdAt\",\n  updated_at AS \"updatedAt\",\n  resumed_at AS \"resumedAt\",\n  external_session_id AS \"externalSessionId\",\n  external_session_kind AS \"externalSessionKind\"\nFROM workflow_waits\nWHERE run_id = :runId\n  AND step_key = :stepKey\nORDER BY created_at ASC"};
+
+/**
+ * Query generated from SQL:
+ * ```
+ * SELECT
+ *   id,
+ *   run_id AS "runId",
+ *   step_key AS "stepKey",
+ *   correlation_key AS "correlationKey",
+ *   status,
+ *   payload,
+ *   resume_payload AS "resumePayload",
+ *   resume_output AS "resumeOutput",
+ *   expires_at AS "expiresAt",
+ *   created_at AS "createdAt",
+ *   updated_at AS "updatedAt",
+ *   resumed_at AS "resumedAt",
+ *   external_session_id AS "externalSessionId",
+ *   external_session_kind AS "externalSessionKind"
+ * FROM workflow_waits
+ * WHERE run_id = :runId
+ *   AND step_key = :stepKey
+ * ORDER BY created_at ASC
+ * ```
+ */
+export const listStepWaits = new PreparedQuery<IListStepWaitsParams,IListStepWaitsResult>(listStepWaitsIR);
 
 
 /** 'RecordExternalSessionEvent' parameters type */
@@ -2623,7 +2931,12 @@ export interface IExpireOpenWaitsParams {
 
 /** 'ExpireOpenWaits' return type */
 export interface IExpireOpenWaitsResult {
-  expiredCount: number | null;
+  correlationKey: string;
+  expiresAt: Date | null;
+  id: string;
+  payload: Json | null;
+  runId: string;
+  stepKey: string;
 }
 
 /** 'ExpireOpenWaits' query type */
@@ -2632,28 +2945,53 @@ export interface IExpireOpenWaitsQuery {
   result: IExpireOpenWaitsResult;
 }
 
-const expireOpenWaitsIR: any = {"usedParamSet":{"limit":true},"params":[{"name":"limit","required":false,"transform":{"type":"scalar"},"locs":[{"a":241,"b":246}]}],"statement":"WITH expired_waits AS (\n  SELECT id, run_id AS \"runId\", step_key AS \"stepKey\"\n  FROM workflow_waits\n  WHERE status = 'open'\n    AND expires_at IS NOT NULL\n    AND expires_at < now()\n  ORDER BY expires_at ASC\n  FOR UPDATE SKIP LOCKED\n  LIMIT :limit\n), updated_waits AS (\n  UPDATE workflow_waits\n  SET\n    status = 'expired',\n    updated_at = now()\n  WHERE id IN (SELECT id FROM expired_waits)\n  RETURNING id\n), updated_runs AS (\n  UPDATE workflow_runs\n  SET\n    status = 'failed',\n    error = jsonb_build_object('message', 'Wait step expired'),\n    lease_owner = NULL,\n    lease_expires_at = NULL,\n    available_at = now(),\n    updated_at = now(),\n    completed_at = now()\n  WHERE id IN (SELECT \"runId\" FROM expired_waits)\n    AND status = 'waiting'\n  RETURNING id\n), inserted_events AS (\n  INSERT INTO workflow_events (run_id, step_key, event_type, payload)\n  SELECT \"runId\", \"stepKey\", 'wait.expired', '{}'::jsonb\n  FROM expired_waits\n)\nSELECT COUNT(*)::int AS \"expiredCount\"\nFROM updated_waits"};
+const expireOpenWaitsIR: any = {"usedParamSet":{"limit":true},"params":[{"name":"limit","required":false,"transform":{"type":"scalar"},"locs":[{"a":286,"b":291}]}],"statement":"SELECT\n  id,\n  run_id AS \"runId\",\n  step_key AS \"stepKey\",\n  correlation_key AS \"correlationKey\",\n  payload,\n  expires_at AS \"expiresAt\"\nFROM workflow_waits\nWHERE status = 'open'\n  AND expires_at IS NOT NULL\n  AND expires_at < now()\nORDER BY expires_at ASC\nFOR UPDATE SKIP LOCKED\nLIMIT :limit"};
 
 /**
  * Query generated from SQL:
  * ```
- * WITH expired_waits AS (
- *   SELECT id, run_id AS "runId", step_key AS "stepKey"
- *   FROM workflow_waits
- *   WHERE status = 'open'
- *     AND expires_at IS NOT NULL
- *     AND expires_at < now()
- *   ORDER BY expires_at ASC
- *   FOR UPDATE SKIP LOCKED
- *   LIMIT :limit
- * ), updated_waits AS (
- *   UPDATE workflow_waits
- *   SET
- *     status = 'expired',
- *     updated_at = now()
- *   WHERE id IN (SELECT id FROM expired_waits)
- *   RETURNING id
- * ), updated_runs AS (
+ * SELECT
+ *   id,
+ *   run_id AS "runId",
+ *   step_key AS "stepKey",
+ *   correlation_key AS "correlationKey",
+ *   payload,
+ *   expires_at AS "expiresAt"
+ * FROM workflow_waits
+ * WHERE status = 'open'
+ *   AND expires_at IS NOT NULL
+ *   AND expires_at < now()
+ * ORDER BY expires_at ASC
+ * FOR UPDATE SKIP LOCKED
+ * LIMIT :limit
+ * ```
+ */
+export const expireOpenWaits = new PreparedQuery<IExpireOpenWaitsParams,IExpireOpenWaitsResult>(expireOpenWaitsIR);
+
+
+/** 'FailExpiredWaitRun' parameters type */
+export interface IFailExpiredWaitRunParams {
+  runId?: string | null | void;
+  stepKey?: string | null | void;
+}
+
+/** 'FailExpiredWaitRun' return type */
+export interface IFailExpiredWaitRunResult {
+  runId: string;
+}
+
+/** 'FailExpiredWaitRun' query type */
+export interface IFailExpiredWaitRunQuery {
+  params: IFailExpiredWaitRunParams;
+  result: IFailExpiredWaitRunResult;
+}
+
+const failExpiredWaitRunIR: any = {"usedParamSet":{"runId":true,"stepKey":true},"params":[{"name":"runId","required":false,"transform":{"type":"scalar"},"locs":[{"a":279,"b":284}]},{"name":"stepKey","required":false,"transform":{"type":"scalar"},"locs":[{"a":313,"b":320},{"a":470,"b":477}]}],"statement":"WITH updated_run AS (\n  UPDATE workflow_runs\n  SET\n    status = 'failed',\n    error = jsonb_build_object('message', 'Wait step expired'),\n    lease_owner = NULL,\n    lease_expires_at = NULL,\n    available_at = now(),\n    updated_at = now(),\n    completed_at = now()\n  WHERE id = :runId\n    AND current_step_key = :stepKey\n    AND status = 'waiting'\n  RETURNING id\n), inserted_event AS (\n  INSERT INTO workflow_events (run_id, step_key, event_type, payload)\n  SELECT id, :stepKey, 'wait.expired', '{}'::jsonb\n  FROM updated_run\n)\nSELECT\n  id AS \"runId\"\nFROM updated_run"};
+
+/**
+ * Query generated from SQL:
+ * ```
+ * WITH updated_run AS (
  *   UPDATE workflow_runs
  *   SET
  *     status = 'failed',
@@ -2663,19 +3001,21 @@ const expireOpenWaitsIR: any = {"usedParamSet":{"limit":true},"params":[{"name":
  *     available_at = now(),
  *     updated_at = now(),
  *     completed_at = now()
- *   WHERE id IN (SELECT "runId" FROM expired_waits)
+ *   WHERE id = :runId
+ *     AND current_step_key = :stepKey
  *     AND status = 'waiting'
  *   RETURNING id
- * ), inserted_events AS (
+ * ), inserted_event AS (
  *   INSERT INTO workflow_events (run_id, step_key, event_type, payload)
- *   SELECT "runId", "stepKey", 'wait.expired', '{}'::jsonb
- *   FROM expired_waits
+ *   SELECT id, :stepKey, 'wait.expired', '{}'::jsonb
+ *   FROM updated_run
  * )
- * SELECT COUNT(*)::int AS "expiredCount"
- * FROM updated_waits
+ * SELECT
+ *   id AS "runId"
+ * FROM updated_run
  * ```
  */
-export const expireOpenWaits = new PreparedQuery<IExpireOpenWaitsParams,IExpireOpenWaitsResult>(expireOpenWaitsIR);
+export const failExpiredWaitRun = new PreparedQuery<IFailExpiredWaitRunParams,IFailExpiredWaitRunResult>(failExpiredWaitRunIR);
 
 
 /** 'CreateSignal' parameters type */
@@ -4220,6 +4560,229 @@ const wakeParentForChildIR: any = {"usedParamSet":{"payload":true,"correlationKe
  * ```
  */
 export const wakeParentForChild = new PreparedQuery<IWakeParentForChildParams,IWakeParentForChildResult>(wakeParentForChildIR);
+
+
+/** 'GetFanOutWaitByChildRunId' parameters type */
+export interface IGetFanOutWaitByChildRunIdParams {
+  childRunId?: string | null | void;
+}
+
+/** 'GetFanOutWaitByChildRunId' return type */
+export interface IGetFanOutWaitByChildRunIdResult {
+  correlationKey: string;
+  createdAt: Date;
+  expiresAt: Date | null;
+  externalSessionId: string | null;
+  externalSessionKind: string | null;
+  id: string;
+  payload: Json | null;
+  resumedAt: Date | null;
+  resumeOutput: Json | null;
+  resumePayload: Json | null;
+  runId: string;
+  status: workflow_wait_status;
+  stepKey: string;
+  updatedAt: Date;
+}
+
+/** 'GetFanOutWaitByChildRunId' query type */
+export interface IGetFanOutWaitByChildRunIdQuery {
+  params: IGetFanOutWaitByChildRunIdParams;
+  result: IGetFanOutWaitByChildRunIdResult;
+}
+
+const getFanOutWaitByChildRunIdIR: any = {"usedParamSet":{"childRunId":true},"params":[{"name":"childRunId","required":false,"transform":{"type":"scalar"},"locs":[{"a":514,"b":524}]}],"statement":"SELECT\n  id,\n  run_id AS \"runId\",\n  step_key AS \"stepKey\",\n  correlation_key AS \"correlationKey\",\n  status,\n  payload,\n  resume_payload AS \"resumePayload\",\n  resume_output AS \"resumeOutput\",\n  expires_at AS \"expiresAt\",\n  created_at AS \"createdAt\",\n  updated_at AS \"updatedAt\",\n  resumed_at AS \"resumedAt\",\n  external_session_id AS \"externalSessionId\",\n  external_session_kind AS \"externalSessionKind\"\nFROM workflow_waits\nWHERE status = 'open'\n  AND payload->>'kind' = 'fanOutChild'\n  AND payload->>'childRunId' = :childRunId\nLIMIT 1"};
+
+/**
+ * Query generated from SQL:
+ * ```
+ * SELECT
+ *   id,
+ *   run_id AS "runId",
+ *   step_key AS "stepKey",
+ *   correlation_key AS "correlationKey",
+ *   status,
+ *   payload,
+ *   resume_payload AS "resumePayload",
+ *   resume_output AS "resumeOutput",
+ *   expires_at AS "expiresAt",
+ *   created_at AS "createdAt",
+ *   updated_at AS "updatedAt",
+ *   resumed_at AS "resumedAt",
+ *   external_session_id AS "externalSessionId",
+ *   external_session_kind AS "externalSessionKind"
+ * FROM workflow_waits
+ * WHERE status = 'open'
+ *   AND payload->>'kind' = 'fanOutChild'
+ *   AND payload->>'childRunId' = :childRunId
+ * LIMIT 1
+ * ```
+ */
+export const getFanOutWaitByChildRunId = new PreparedQuery<IGetFanOutWaitByChildRunIdParams,IGetFanOutWaitByChildRunIdResult>(getFanOutWaitByChildRunIdIR);
+
+
+/** 'UpdateWaitStatus' parameters type */
+export interface IUpdateWaitStatusParams {
+  resumePayload?: Json | null | void;
+  status?: workflow_wait_status | null | void;
+  waitId?: string | null | void;
+}
+
+/** 'UpdateWaitStatus' return type */
+export interface IUpdateWaitStatusResult {
+  correlationKey: string;
+  createdAt: Date;
+  expiresAt: Date | null;
+  externalSessionId: string | null;
+  externalSessionKind: string | null;
+  id: string;
+  payload: Json | null;
+  resumedAt: Date | null;
+  resumeOutput: Json | null;
+  resumePayload: Json | null;
+  runId: string;
+  status: workflow_wait_status;
+  stepKey: string;
+  updatedAt: Date;
+}
+
+/** 'UpdateWaitStatus' query type */
+export interface IUpdateWaitStatusQuery {
+  params: IUpdateWaitStatusParams;
+  result: IUpdateWaitStatusResult;
+}
+
+const updateWaitStatusIR: any = {"usedParamSet":{"status":true,"resumePayload":true,"waitId":true},"params":[{"name":"status","required":false,"transform":{"type":"scalar"},"locs":[{"a":37,"b":43},{"a":154,"b":160}]},{"name":"resumePayload","required":false,"transform":{"type":"scalar"},"locs":[{"a":87,"b":100}]},{"name":"waitId","required":false,"transform":{"type":"scalar"},"locs":[{"a":266,"b":272}]}],"statement":"UPDATE workflow_waits\nSET\n  status = :status::workflow_wait_status,\n  resume_payload = :resumePayload,\n  updated_at = now(),\n  resumed_at = CASE\n    WHEN :status::workflow_wait_status = 'resumed'::workflow_wait_status THEN now()\n    ELSE resumed_at\n  END\nWHERE id = :waitId\nRETURNING\n  id,\n  run_id AS \"runId\",\n  step_key AS \"stepKey\",\n  correlation_key AS \"correlationKey\",\n  status,\n  payload,\n  resume_payload AS \"resumePayload\",\n  resume_output AS \"resumeOutput\",\n  expires_at AS \"expiresAt\",\n  created_at AS \"createdAt\",\n  updated_at AS \"updatedAt\",\n  resumed_at AS \"resumedAt\",\n  external_session_id AS \"externalSessionId\",\n  external_session_kind AS \"externalSessionKind\""};
+
+/**
+ * Query generated from SQL:
+ * ```
+ * UPDATE workflow_waits
+ * SET
+ *   status = :status::workflow_wait_status,
+ *   resume_payload = :resumePayload,
+ *   updated_at = now(),
+ *   resumed_at = CASE
+ *     WHEN :status::workflow_wait_status = 'resumed'::workflow_wait_status THEN now()
+ *     ELSE resumed_at
+ *   END
+ * WHERE id = :waitId
+ * RETURNING
+ *   id,
+ *   run_id AS "runId",
+ *   step_key AS "stepKey",
+ *   correlation_key AS "correlationKey",
+ *   status,
+ *   payload,
+ *   resume_payload AS "resumePayload",
+ *   resume_output AS "resumeOutput",
+ *   expires_at AS "expiresAt",
+ *   created_at AS "createdAt",
+ *   updated_at AS "updatedAt",
+ *   resumed_at AS "resumedAt",
+ *   external_session_id AS "externalSessionId",
+ *   external_session_kind AS "externalSessionKind"
+ * ```
+ */
+export const updateWaitStatus = new PreparedQuery<IUpdateWaitStatusParams,IUpdateWaitStatusResult>(updateWaitStatusIR);
+
+
+/** 'QueueWaitingRun' parameters type */
+export interface IQueueWaitingRunParams {
+  eventPayload?: Json | null | void;
+  eventType?: string | null | void;
+  runId?: string | null | void;
+  stepKey?: string | null | void;
+}
+
+/** 'QueueWaitingRun' return type */
+export interface IQueueWaitingRunResult {
+  availableAt: Date;
+  branchedFromAttemptId: string | null;
+  branchedFromAttemptRunId: string | null;
+  branchedFromRunId: string | null;
+  cancelMode: string | null;
+  cancelRequestedAt: Date | null;
+  completedAt: Date | null;
+  context: Json;
+  continuedFromRunId: string | null;
+  createdAt: Date;
+  currentStepKey: string | null;
+  definitionName: string;
+  definitionVersion: number;
+  error: Json | null;
+  id: string;
+  input: Json;
+  leaseExpiresAt: Date | null;
+  leaseOwner: string | null;
+  parentRunId: string | null;
+  parentStepKey: string | null;
+  priority: number;
+  result: Json | null;
+  status: workflow_run_status;
+  supersededByRunId: string | null;
+  taskQueue: string;
+  updatedAt: Date;
+}
+
+/** 'QueueWaitingRun' query type */
+export interface IQueueWaitingRunQuery {
+  params: IQueueWaitingRunParams;
+  result: IQueueWaitingRunResult;
+}
+
+const queueWaitingRunIR: any = {"usedParamSet":{"runId":true,"stepKey":true,"eventType":true,"eventPayload":true},"params":[{"name":"runId","required":false,"transform":{"type":"scalar"},"locs":[{"a":189,"b":194}]},{"name":"stepKey","required":false,"transform":{"type":"scalar"},"locs":[{"a":223,"b":230},{"a":1252,"b":1259}]},{"name":"eventType","required":false,"transform":{"type":"scalar"},"locs":[{"a":1262,"b":1271}]},{"name":"eventPayload","required":false,"transform":{"type":"scalar"},"locs":[{"a":1274,"b":1286}]}],"statement":"WITH updated_run AS (\n  UPDATE workflow_runs\n  SET\n    status = 'queued',\n    lease_owner = NULL,\n    lease_expires_at = NULL,\n    available_at = now(),\n    updated_at = now()\n  WHERE id = :runId\n    AND current_step_key = :stepKey\n    AND status = 'waiting'\n  RETURNING\n    id,\n    parent_run_id AS \"parentRunId\",\n    parent_step_key AS \"parentStepKey\",\n    continued_from_run_id AS \"continuedFromRunId\",\n    branched_from_run_id AS \"branchedFromRunId\",\n    branched_from_attempt_run_id AS \"branchedFromAttemptRunId\",\n    branched_from_attempt_id AS \"branchedFromAttemptId\",\n    superseded_by_run_id AS \"supersededByRunId\",\n    definition_name AS \"definitionName\",\n    definition_version AS \"definitionVersion\",\n    task_queue AS \"taskQueue\",\n    priority,\n    status,\n    current_step_key AS \"currentStepKey\",\n    input,\n    context,\n    result,\n    error,\n    lease_owner AS \"leaseOwner\",\n    lease_expires_at AS \"leaseExpiresAt\",\n    cancel_requested_at AS \"cancelRequestedAt\",\n    cancel_mode AS \"cancelMode\",\n    available_at AS \"availableAt\",\n    created_at AS \"createdAt\",\n    updated_at AS \"updatedAt\",\n    completed_at AS \"completedAt\"\n), inserted_event AS (\n  INSERT INTO workflow_events (run_id, step_key, event_type, payload)\n  SELECT id, :stepKey, :eventType, :eventPayload\n  FROM updated_run\n)\nSELECT * FROM updated_run"};
+
+/**
+ * Query generated from SQL:
+ * ```
+ * WITH updated_run AS (
+ *   UPDATE workflow_runs
+ *   SET
+ *     status = 'queued',
+ *     lease_owner = NULL,
+ *     lease_expires_at = NULL,
+ *     available_at = now(),
+ *     updated_at = now()
+ *   WHERE id = :runId
+ *     AND current_step_key = :stepKey
+ *     AND status = 'waiting'
+ *   RETURNING
+ *     id,
+ *     parent_run_id AS "parentRunId",
+ *     parent_step_key AS "parentStepKey",
+ *     continued_from_run_id AS "continuedFromRunId",
+ *     branched_from_run_id AS "branchedFromRunId",
+ *     branched_from_attempt_run_id AS "branchedFromAttemptRunId",
+ *     branched_from_attempt_id AS "branchedFromAttemptId",
+ *     superseded_by_run_id AS "supersededByRunId",
+ *     definition_name AS "definitionName",
+ *     definition_version AS "definitionVersion",
+ *     task_queue AS "taskQueue",
+ *     priority,
+ *     status,
+ *     current_step_key AS "currentStepKey",
+ *     input,
+ *     context,
+ *     result,
+ *     error,
+ *     lease_owner AS "leaseOwner",
+ *     lease_expires_at AS "leaseExpiresAt",
+ *     cancel_requested_at AS "cancelRequestedAt",
+ *     cancel_mode AS "cancelMode",
+ *     available_at AS "availableAt",
+ *     created_at AS "createdAt",
+ *     updated_at AS "updatedAt",
+ *     completed_at AS "completedAt"
+ * ), inserted_event AS (
+ *   INSERT INTO workflow_events (run_id, step_key, event_type, payload)
+ *   SELECT id, :stepKey, :eventType, :eventPayload
+ *   FROM updated_run
+ * )
+ * SELECT * FROM updated_run
+ * ```
+ */
+export const queueWaitingRun = new PreparedQuery<IQueueWaitingRunParams,IQueueWaitingRunResult>(queueWaitingRunIR);
 
 
 /** 'RequestCancelRun' parameters type */

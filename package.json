@@ -27,6 +27,7 @@
     "build": "node scripts/generate-migrations.mjs && npm run build:css && tsc -p tsconfig.json && node scripts/sync-workspace-packages.mjs",
     "build:packages": "node scripts/sync-workspace-packages.mjs",
     "build:css": "tailwindcss -i src/views/dashboard/input.css -o src/views/dashboard/styles.css && mkdir -p dist/src/views/dashboard && cp src/views/dashboard/styles.css dist/src/views/dashboard/styles.css",
+    "bench:throughput": "npx tsx bench/throughput.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint .",
     "test": "vitest run",
@@ -41,6 +42,10 @@
   "dependencies": {
     "@fastify/sensible": "6.0.3",
     "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/core": "^2.8.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.219.0",
+    "@opentelemetry/resources": "^2.8.0",
+    "@opentelemetry/semantic-conventions": "^1.41.1",
     "@pgtyped/runtime": "2.4.2",
     "commander": "^15.0.0",
     "cron-parser": "^5.6.0",

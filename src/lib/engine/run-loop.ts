@@ -3,6 +3,7 @@ import type {
   ChildStepResult,
   CompensationDefinition,
   CompensationHandler,
+  HumanTaskOpenResult,
   SleepStepDefinition,
   StepExecutionContext,
   StepExecutionKV,
@@ -26,6 +27,20 @@ import {
   getStep,
   type DefinitionRegistry,
 } from "./registry.js"
+import {
+  buildFanOutChildCorrelationKey,
+  buildFanOutChildIdempotencyKey,
+  createFanOutWaitPayload,
+  fanOutFailureModeDefault,
+  fanOutJoinDefault,
+  getFanOutJoinState,
+  sortFanOutChildRuns,
+} from "./fan-out.js"
+import {
+  buildHumanTaskCorrelationKey,
+  signHumanTaskToken,
+  type HumanTaskWaitPayload,
+} from "./human-task.js"
 import {
   getRetryAvailableAt,
   createRetryDelayInput,
@@ -190,6 +205,11 @@ export const withTimeout = async <T>(
 
 export const continueRun = async (args: {
   definitions: DefinitionRegistry
+  humanTasks?: {
+    baseUrl: string
+    secret?: string
+    toleranceSeconds: number
+  }
   metrics: HippoMetrics
   store: WorkflowStore
   tracer: HippoTracer
@@ -312,15 +332,25 @@ export const continueRun = async (args: {
           stepKey,
           stepKind: step.kind,
           taskQueue: activeRun.taskQueue,
+          priority: activeRun.priority,
           workerId: args.workerId,
         }),
       },
-      async () => {
+      async (stepSpan) => {
         const attempt = await args.store.beginStepAttempt({
           runId: activeRun.id,
           stepKey,
           input: createStepInput(activeRun, stepKey),
         })
+        stepSpan.setAttributes(
+          createTraceAttributes({
+            operation: "workflow.step.execute",
+            attemptId: attempt.id,
+            attemptNumber: attempt.attempt,
+            attemptKind: attempt.kind,
+            retryCount: Math.max(0, attempt.attempt - 1),
+          })
+        )
         const executionContext = createExecutionContext({
           run: {
             ...activeRun,
@@ -375,10 +405,24 @@ export const continueRun = async (args: {
                   stepKey,
                   stepKind: step.kind,
                   taskQueue: activeRun.taskQueue,
+                  priority: activeRun.priority,
                   workerId: args.workerId,
+                  attemptId: attempt.id,
+                  attemptNumber: attempt.attempt,
+                  attemptKind: attempt.kind,
+                  retryCount: Math.max(0, attempt.attempt - 1),
                 }),
               },
-              () => Promise.resolve(step.open(executionContext))
+              async (waitSpan) => {
+                const result = await Promise.resolve(step.open(executionContext))
+                waitSpan.setAttributes(
+                  createTraceAttributes({
+                    operation: "workflow.step.wait.open",
+                    waitCorrelationKey: result.correlationKey,
+                  })
+                )
+                return result
+              }
             )
             activeRun = await args.store.openWait({
               runId: activeRun.id,
@@ -390,6 +434,101 @@ export const continueRun = async (args: {
               payload: waitResult.payload ?? null,
               expiresAt: getStepExpiresAt(step.timeoutMs, executionContext.now),
               output: waitResult.payload ?? null,
+            })
+
+            args.metrics.stepAttempts.inc({
+              workflow: definition.name,
+              step: stepKey,
+              status: "completed",
+            })
+            args.metrics.waitOpens.set(await args.store.countOpenWaits())
+            return activeRun
+          }
+
+          if (step.kind === "humanTask") {
+            const secret = args.humanTasks?.secret
+            const baseUrl = args.humanTasks?.baseUrl
+
+            if (!secret || !baseUrl) {
+              throw new Error(
+                `Human task step "${stepKey}" in workflow "${definition.name}" requires human task signing config`
+              )
+            }
+
+            const expiresAt = getStepExpiresAt(step.timeoutMs, executionContext.now)
+            const correlationKey = buildHumanTaskCorrelationKey({
+              runId: activeRun.id,
+              stepKey,
+            })
+            const approvalToken = signHumanTaskToken({
+              correlationKey,
+              expiresAt,
+              secret,
+            })
+            const normalizedBaseUrl = baseUrl.replace(/\/+$/, "")
+            const formUrl = `${normalizedBaseUrl}/human-tasks/${approvalToken}`
+            const approvalUrl = `${normalizedBaseUrl}/v1/human-tasks/${approvalToken}`
+            const timeoutStepKey = step.timeout.transition ?? step.transitions?.timeout
+
+            if (!timeoutStepKey) {
+              throw new Error(
+                `Human task step "${stepKey}" in workflow "${definition.name}" must resolve a timeout transition`
+              )
+            }
+
+            const waitResult = await args.tracer.withSpan(
+              {
+                name: "hippo.workflow.step.human_task.open",
+                attributes: createTraceAttributes({
+                  operation: "workflow.step.human_task.open",
+                  workflowName: activeRun.definitionName,
+                  workflowVersion: activeRun.definitionVersion,
+                  runId: activeRun.id,
+                  stepKey,
+                  stepKind: step.kind,
+                  taskQueue: activeRun.taskQueue,
+                  priority: activeRun.priority,
+                  workerId: args.workerId,
+                  attemptId: attempt.id,
+                  attemptNumber: attempt.attempt,
+                  attemptKind: attempt.kind,
+                  retryCount: Math.max(0, attempt.attempt - 1),
+                  waitCorrelationKey: correlationKey,
+                }),
+              },
+              () =>
+                Promise.resolve(
+                  step.open({
+                    ...executionContext,
+                    approvalToken,
+                    approvalUrl,
+                    formUrl,
+                  })
+                )
+            )
+
+            const waitPayload: HumanTaskWaitPayload = {
+              kind: "humanTask",
+              approvalUrl,
+              formUrl,
+              prompt: (waitResult as HumanTaskOpenResult).prompt ?? null,
+              timeout: {
+                nextStepKey: timeoutStepKey,
+                context: mergeContext(activeRun.context, step.timeout.patch),
+                output: step.timeout.output ?? null,
+              },
+            }
+
+            activeRun = await args.store.openWait({
+              runId: activeRun.id,
+              stepKey,
+              workerId: args.workerId,
+              attemptId: attempt.id,
+              context: activeRun.context,
+              correlationKey,
+              payload: waitPayload,
+              expiresAt,
+              output: waitPayload,
             })
 
             args.metrics.stepAttempts.inc({
@@ -440,6 +579,9 @@ export const continueRun = async (args: {
                     stepKey,
                     stepKind: step.kind,
                     taskQueue: input.run.taskQueue,
+                    priority: input.run.priority,
+                    attemptNumber: input.attempt,
+                    retryCount: Math.max(0, input.attempt - 1),
                   }),
                 },
                 () => Promise.resolve(step.resume(signalExecutionContext, input.payload))
@@ -569,7 +711,13 @@ export const continueRun = async (args: {
                     stepKey,
                     stepKind: step.kind,
                     taskQueue: activeRun.taskQueue,
+                    priority: activeRun.priority,
                     workerId: args.workerId,
+                    attemptId: attempt.id,
+                    attemptNumber: attempt.attempt,
+                    attemptKind: attempt.kind,
+                    retryCount: Math.max(0, attempt.attempt - 1),
+                    childRunId: run.id,
                   }),
                 },
                 () => Promise.resolve(step.resume(childExecutionContext, run))
@@ -621,38 +769,362 @@ export const continueRun = async (args: {
                     stepKey,
                     stepKind: step.kind,
                     taskQueue: activeRun.taskQueue,
+                    priority: activeRun.priority,
                     workerId: args.workerId,
+                    attemptId: attempt.id,
+                    attemptNumber: attempt.attempt,
+                    attemptKind: attempt.kind,
+                    retryCount: Math.max(0, attempt.attempt - 1),
                   }),
                 },
                 () => Promise.resolve(step.input(executionContext))
               )
-              await args.store.startRun({
-                parentRunId: activeRun.id,
-                parentStepKey: stepKey,
-                definitionName: step.workflow,
-                definitionVersion: requireDefinition(args.definitions, step.workflow)
-                  .version,
-                taskQueue: activeRun.taskQueue,
-                priority: activeRun.priority,
-                input: childInput,
-                currentStepKey: requireDefinition(args.definitions, step.workflow)
-                  .startAt,
-              })
+              const childDefinition = requireDefinition(args.definitions, step.workflow)
+              const childRun = await args.tracer.withSpan(
+                {
+                  name: "hippo.workflow.step.child.start",
+                  attributes: createTraceAttributes({
+                    operation: "workflow.step.child.start",
+                    workflowName: activeRun.definitionName,
+                    workflowVersion: activeRun.definitionVersion,
+                    runId: activeRun.id,
+                    stepKey,
+                    stepKind: step.kind,
+                    taskQueue: activeRun.taskQueue,
+                    priority: activeRun.priority,
+                    workerId: args.workerId,
+                    attemptId: attempt.id,
+                    attemptNumber: attempt.attempt,
+                    attemptKind: attempt.kind,
+                    retryCount: Math.max(0, attempt.attempt - 1),
+                  }),
+                },
+                async (childSpan) => {
+                  const startedChildRun = await args.store.startRun({
+                    parentRunId: activeRun.id,
+                    parentStepKey: stepKey,
+                    definitionName: step.workflow,
+                    definitionVersion: childDefinition.version,
+                    taskQueue: activeRun.taskQueue,
+                    priority: activeRun.priority,
+                    input: childInput,
+                    currentStepKey: childDefinition.startAt,
+                  })
+                  childSpan.setAttributes(
+                    createTraceAttributes({
+                      operation: "workflow.step.child.start",
+                      childRunId: startedChildRun.id,
+                    })
+                  )
+                  return startedChildRun
+                }
+              )
+              stepSpan.setAttributes(
+                createTraceAttributes({
+                  operation: "workflow.step.execute",
+                  childRunId: childRun.id,
+                })
+              )
             }
 
+            const childCorrelationKey = `child:${activeRun.id}:${stepKey}`
             activeRun = await args.store.openWait({
               runId: activeRun.id,
               stepKey,
               workerId: args.workerId,
               attemptId: attempt.id,
               context: activeRun.context,
-              correlationKey: `child:${activeRun.id}:${stepKey}`,
+              correlationKey: childCorrelationKey,
               payload: {
                 workflowName: step.workflow,
               },
               expiresAt: null,
               output: null,
             })
+            stepSpan.setAttributes(
+              createTraceAttributes({
+                operation: "workflow.step.execute",
+                waitCorrelationKey: childCorrelationKey,
+              })
+            )
+            args.metrics.stepAttempts.inc({
+              workflow: definition.name,
+              step: stepKey,
+              status: "completed",
+            })
+            args.metrics.waitOpens.set(await args.store.countOpenWaits())
+            return activeRun
+          }
+
+          if (step.kind === "fanOut") {
+            const childRuns = (await args.store.listChildRuns(activeRun.id)).filter(
+              (run) => run.parentStepKey === stepKey
+            )
+            const existingWaits = await args.store.listStepWaits({
+              runId: activeRun.id,
+              stepKey,
+            })
+            const join = step.join ?? fanOutJoinDefault
+            const failureMode = step.failureMode ?? fanOutFailureModeDefault
+
+            const resumeFanOut = async (runs: WorkflowRunRecord[]) => {
+              const fanOutExecutionContext = createExecutionContext({
+                run: {
+                  ...activeRun,
+                  kv: stepBindings.kv,
+                },
+                attempt: attempt.attempt,
+                stepKey,
+                heartbeat: async () => false,
+                emit: async (event) => {
+                  await args.store.emitStepEvent({
+                    runId: activeRun.id,
+                    stepKey,
+                    stepAttemptId: attempt.id,
+                    type: event.type,
+                    data: event.data,
+                  })
+                },
+                recordUsage: async (usage) => {
+                  await args.store.recordUsage({
+                    runId: activeRun.id,
+                    stepKey,
+                    stepAttemptId: attempt.id,
+                    usage,
+                    ...(definition.budget === undefined
+                      ? {}
+                      : { budget: definition.budget }),
+                  })
+                },
+                db: stepBindings.db,
+                outbox: stepBindings.outbox,
+                transactional: false,
+                kv: stepBindings.kv,
+              })
+              const orderedChildRuns = sortFanOutChildRuns({
+                childRuns: runs,
+                waits: existingWaits,
+              })
+              const result: ChildStepResult = await args.tracer.withSpan(
+                {
+                  name: "hippo.workflow.step.fan_out.resume",
+                  attributes: createTraceAttributes({
+                    operation: "workflow.step.fan_out.resume",
+                    workflowName: activeRun.definitionName,
+                    workflowVersion: activeRun.definitionVersion,
+                    runId: activeRun.id,
+                    stepKey,
+                    stepKind: step.kind,
+                    taskQueue: activeRun.taskQueue,
+                    priority: activeRun.priority,
+                    workerId: args.workerId,
+                    attemptId: attempt.id,
+                    attemptNumber: attempt.attempt,
+                    attemptKind: attempt.kind,
+                    retryCount: Math.max(0, attempt.attempt - 1),
+                  }),
+                },
+                () => Promise.resolve(step.resume(fanOutExecutionContext, orderedChildRuns))
+              )
+              const nextStepKey = result.transition ?? step.next
+
+              if (!nextStepKey) {
+                throw new Error(
+                  `Fan-out step "${stepKey}" in workflow "${definition.name}" did not resolve a next step`
+                )
+              }
+
+              return {
+                nextStepKey,
+                context: mergeContext(activeRun.context, result.patch),
+                output: result.output ?? null,
+              }
+            }
+
+            if (existingWaits.length > 0) {
+              const joinState = getFanOutJoinState({
+                childRuns,
+                waits: existingWaits,
+              })
+
+              if (!joinState.ready) {
+                throw new Error(
+                  `Fan-out step "${stepKey}" in workflow "${definition.name}" was re-queued before its join condition was satisfied`
+                )
+              }
+
+              const terminalChildRuns = childRuns.filter((run) =>
+                isTerminalStatus(run.status)
+              )
+              const result = await resumeFanOut(terminalChildRuns)
+              activeRun = await args.store.advanceTaskStep({
+                runId: activeRun.id,
+                stepKey,
+                workerId: args.workerId,
+                attemptId: attempt.id,
+                nextStepKey: result.nextStepKey,
+                context: result.context,
+                output: result.output,
+              })
+
+              args.metrics.stepAttempts.inc({
+                workflow: definition.name,
+                step: stepKey,
+                status: "completed",
+              })
+              return activeRun
+            }
+
+            const requestedChildren = await args.tracer.withSpan(
+              {
+                name: "hippo.workflow.step.fan_out.children",
+                attributes: createTraceAttributes({
+                  operation: "workflow.step.fan_out.children",
+                  workflowName: activeRun.definitionName,
+                  workflowVersion: activeRun.definitionVersion,
+                  runId: activeRun.id,
+                  stepKey,
+                  stepKind: step.kind,
+                  taskQueue: activeRun.taskQueue,
+                  priority: activeRun.priority,
+                  workerId: args.workerId,
+                  attemptId: attempt.id,
+                  attemptNumber: attempt.attempt,
+                  attemptKind: attempt.kind,
+                  retryCount: Math.max(0, attempt.attempt - 1),
+                }),
+              },
+              () => Promise.resolve(step.children(executionContext))
+            )
+
+            if (requestedChildren.length === 0) {
+              const result = await resumeFanOut([])
+              activeRun = await args.store.advanceTaskStep({
+                runId: activeRun.id,
+                stepKey,
+                workerId: args.workerId,
+                attemptId: attempt.id,
+                nextStepKey: result.nextStepKey,
+                context: result.context,
+                output: result.output,
+              })
+
+              args.metrics.stepAttempts.inc({
+                workflow: definition.name,
+                step: stepKey,
+                status: "completed",
+              })
+              return activeRun
+            }
+
+            const childRunsByIndex = new Map<number, WorkflowRunRecord>()
+
+            for (const [index, child] of requestedChildren.entries()) {
+              const existingChildRun = childRuns[index]
+
+              if (existingChildRun) {
+                childRunsByIndex.set(index, existingChildRun)
+                continue
+              }
+
+              const childDefinition = requireDefinition(args.definitions, child.workflow)
+              const startedChildRun = await args.tracer.withSpan(
+                {
+                  name: "hippo.workflow.step.fan_out.start",
+                  attributes: createTraceAttributes({
+                    operation: "workflow.step.fan_out.start",
+                    workflowName: activeRun.definitionName,
+                    workflowVersion: activeRun.definitionVersion,
+                    runId: activeRun.id,
+                    stepKey,
+                    stepKind: step.kind,
+                    taskQueue: activeRun.taskQueue,
+                    priority: activeRun.priority,
+                    workerId: args.workerId,
+                    attemptId: attempt.id,
+                    attemptNumber: attempt.attempt,
+                    attemptKind: attempt.kind,
+                    retryCount: Math.max(0, attempt.attempt - 1),
+                  }),
+                },
+                async (childSpan) => {
+                  const nextChildRun = await args.store.startRun({
+                    parentRunId: activeRun.id,
+                    parentStepKey: stepKey,
+                    definitionName: child.workflow,
+                    definitionVersion: childDefinition.version,
+                    taskQueue: activeRun.taskQueue,
+                    priority: activeRun.priority,
+                    input: child.input,
+                    currentStepKey: childDefinition.startAt,
+                    idempotencyKey: buildFanOutChildIdempotencyKey({
+                      parentRunId: activeRun.id,
+                      stepKey,
+                      childIndex: index,
+                    }),
+                  })
+                  childSpan.setAttributes(
+                    createTraceAttributes({
+                      operation: "workflow.step.fan_out.start",
+                      childRunId: nextChildRun.id,
+                    })
+                  )
+                  return nextChildRun
+                }
+              )
+
+              childRunsByIndex.set(index, startedChildRun)
+            }
+
+            const waitInputs = requestedChildren.map((child, index) => {
+              const childRun = childRunsByIndex.get(index)
+
+              if (!childRun) {
+                throw new Error(
+                  `Fan-out step "${stepKey}" in workflow "${definition.name}" failed to create child ${String(index)}`
+                )
+              }
+
+              return {
+                correlationKey: buildFanOutChildCorrelationKey({
+                  parentRunId: activeRun.id,
+                  stepKey,
+                  childIndex: index,
+                }),
+                payload: createFanOutWaitPayload({
+                  workflowName: child.workflow,
+                  childRunId: childRun.id,
+                  childIndex: index,
+                  childCount: requestedChildren.length,
+                  join,
+                  failureMode,
+                }),
+                expiresAt:
+                  step.timeoutMs === undefined
+                    ? null
+                    : getStepExpiresAt(step.timeoutMs, executionContext.now),
+              }
+            })
+
+            activeRun = await args.store.openFanOutWaits({
+              runId: activeRun.id,
+              stepKey,
+              workerId: args.workerId,
+              attemptId: attempt.id,
+              context: activeRun.context,
+              waits: waitInputs,
+              output: null,
+            })
+            const firstWaitCorrelationKey = waitInputs[0]?.correlationKey
+
+            if (firstWaitCorrelationKey) {
+              stepSpan.setAttributes(
+                createTraceAttributes({
+                  operation: "workflow.step.execute",
+                  waitCorrelationKey: firstWaitCorrelationKey,
+                })
+              )
+            }
             args.metrics.stepAttempts.inc({
               workflow: definition.name,
               step: stepKey,
@@ -674,7 +1146,12 @@ export const continueRun = async (args: {
                   stepKey,
                   stepKind: step.kind,
                   taskQueue: activeRun.taskQueue,
+                  priority: activeRun.priority,
                   workerId: args.workerId,
+                  attemptId: attempt.id,
+                  attemptNumber: attempt.attempt,
+                  attemptKind: attempt.kind,
+                  retryCount: Math.max(0, attempt.attempt - 1),
                 }),
               },
               () =>
@@ -698,6 +1175,12 @@ export const continueRun = async (args: {
               externalSessionId: sessionResult.externalId,
               externalSessionKind: step.sessionKind,
             })
+            stepSpan.setAttributes(
+              createTraceAttributes({
+                operation: "workflow.step.execute",
+                waitCorrelationKey: `external:${sessionResult.externalId}`,
+              })
+            )
 
             args.metrics.stepAttempts.inc({
               workflow: definition.name,

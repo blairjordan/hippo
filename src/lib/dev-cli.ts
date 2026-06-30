@@ -1,10 +1,13 @@
 import { readFile } from "node:fs/promises"
 import net from "node:net"
 
+import type { HippoProcessRole } from "./process-role.js"
+
 export type DevCommandStep = {
   kind: "setup" | "serve"
   command: string
   args: string[]
+  env?: Record<string, string>
 }
 
 export const defaultLocalDatabaseUrl =
@@ -47,7 +50,10 @@ export const readEnvFile = async (path: string) => {
 export const getNpmCommand = (platform: NodeJS.Platform) =>
   platform === "win32" ? "npm.cmd" : "npm"
 
-export const createHippoDevPlan = (args: { platform: NodeJS.Platform }) =>
+export const createHippoDevPlan = (args: {
+  platform: NodeJS.Platform
+  role?: HippoProcessRole
+}) =>
   [
     {
       kind: "setup",
@@ -63,6 +69,9 @@ export const createHippoDevPlan = (args: { platform: NodeJS.Platform }) =>
       kind: "serve",
       command: "npx",
       args: ["tsx", "src/index.ts"],
+      ...(args.role === undefined || args.role === "all"
+        ? {}
+        : { env: { HIPPO_ROLE: args.role } }),
     },
   ] as const satisfies readonly DevCommandStep[]
 

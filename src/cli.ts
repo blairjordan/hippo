@@ -3,24 +3,14 @@ import path from "node:path"
 import process from "node:process"
 import { pathToFileURL } from "node:url"
 
-import { createApp } from "./app.js"
 import {
-  createApiAuthenticator,
-  createCallbackAuthenticator,
-} from "./lib/auth.js"
-import {
-  closeSql,
   createDefaultCliDeps,
   defaultWorkflowPath,
-  parseTaskQueues,
   resolveWorkflowModuleUrl,
   runStoreCommand,
   type CliDeps,
 } from "./lib/cli-deps.js"
-import { startOutboxLoop } from "./lib/outbox.js"
-import { startRecoveryLoop } from "./lib/recovery.js"
-import { startScheduleLoop } from "./lib/scheduler.js"
-import { startWorkerLoop } from "./lib/worker.js"
+import type { HippoProcessRole } from "./lib/process-role.js"
 import type {
   WorkflowRunStatus,
 } from "./types/workflow.js"
@@ -104,159 +94,54 @@ export const createHippoCli = (inputDeps: Partial<CliDeps> = {}) => {
 
   addRenderCommand(program)
 
-  program
-    .command("worker")
-    .description("Start background execution loops (worker, scheduler, recovery, outbox)")
-    .option(
-      "--workflows <path>",
-      "Path to the workflows index file",
-      defaultWorkflowPath
-    )
-    .action(async (options: { workflows?: string }) => {
-      try {
-        const runtime = await deps.bootstrapEngine(
-          options.workflows ?? defaultWorkflowPath
-        )
+  const addRoleCommand = (args: {
+    name: string
+    role: HippoProcessRole
+    description: string
+    alias?: string
+  }) => {
+    const command = program.command(args.name).description(args.description)
 
-        deps.stdout.log("Starting Hippo worker loops...")
-        const stopWorker = startWorkerLoop({
-          engine: runtime.engine,
-          workerId: runtime.config.HIPPO_WORKER_ID,
-          taskQueues: parseTaskQueues(runtime.config.HIPPO_TASK_QUEUES),
-          pollIntervalMs: runtime.config.HIPPO_POLL_INTERVAL_MS,
-          leaseMs: runtime.config.HIPPO_LEASE_MS,
-          listenForWakeups: (onWake) => runtime.notifier.listen(() => onWake()),
-          onError: (error) => deps.stderr.error("Worker error:", error),
-          tracer: runtime.tracer,
-        })
-        const stopRecovery = startRecoveryLoop({
-          intervalMs: runtime.config.HIPPO_RECOVERY_INTERVAL_MS,
-          limit: 100,
-          metrics: runtime.metrics,
-          onError: (error) => deps.stderr.error("Recovery error:", error),
-          store: runtime.store,
-          tracer: runtime.tracer,
-        })
-        const stopScheduler = startScheduleLoop({
-          engine: runtime.engine,
-          intervalMs: runtime.config.HIPPO_SCHEDULE_INTERVAL_MS,
-          limit: 100,
-          onError: (error) => deps.stderr.error("Scheduler error:", error),
-          store: runtime.store,
-          tracer: runtime.tracer,
-        })
-        const stopOutbox = startOutboxLoop({
-          handlers: {},
-          intervalMs: runtime.config.HIPPO_OUTBOX_INTERVAL_MS,
-          limit: 100,
-          onError: (error, record) => deps.stderr.error("Outbox error:", error, record),
-          store: runtime.store,
-          tracer: runtime.tracer,
-        })
-        const shutdown = async () => {
-          deps.stdout.log("Shutting down worker loops...")
-          await stopWorker()
-          await stopRecovery()
-          await stopScheduler()
-          await stopOutbox()
-          await closeSql(runtime.sql)
-          deps.exit(0)
+    if (args.alias) {
+      command.alias(args.alias)
+    }
+
+    command
+      .option(
+        "--workflows <path>",
+        "Path to the workflows index file",
+        defaultWorkflowPath
+      )
+      .action(async (options: { workflows?: string }) => {
+        try {
+          await deps.runProcessRole({
+            role: args.role,
+            workflowsPath: options.workflows ?? defaultWorkflowPath,
+          })
+        } catch (error) {
+          deps.stderr.error(`Failed to start Hippo '${args.role}' role:`, error)
+          deps.exit(1)
         }
+      })
+  }
 
-        process.on("SIGINT", () => void shutdown())
-        process.on("SIGTERM", () => void shutdown())
-      } catch (error) {
-        deps.stderr.error("Worker bootstrap failed:", error)
-        deps.exit(1)
-      }
-    })
-
-  program
-    .command("server")
-    .description("Start the API server, dashboard, and background loops")
-    .option(
-      "--workflows <path>",
-      "Path to the workflows index file",
-      defaultWorkflowPath
-    )
-    .action(async (options: { workflows?: string }) => {
-      try {
-        const runtime = await deps.bootstrapEngine(
-          options.workflows ?? defaultWorkflowPath
-        )
-        deps.stdout.log("Starting Hippo API server & worker loops...")
-
-        const app = createApp({
-          auth: {
-            verifyApiRequest: createApiAuthenticator(runtime.config.HIPPO_API_TOKEN),
-            verifyCallbackRequest: createCallbackAuthenticator({
-              secret: runtime.config.HIPPO_CALLBACK_SECRET,
-              toleranceSeconds: runtime.config.HIPPO_CALLBACK_TOLERANCE_SECONDS,
-            }),
-          },
-          engine: runtime.engine,
-          externalHeartbeatLeaseMs: runtime.config.HIPPO_LEASE_MS,
-          listenForNotifications: runtime.notifier.listen,
-          metrics: runtime.metrics,
-          store: runtime.store,
-          tracer: runtime.tracer,
-        })
-        const stopWorker = startWorkerLoop({
-          engine: runtime.engine,
-          workerId: runtime.config.HIPPO_WORKER_ID,
-          taskQueues: parseTaskQueues(runtime.config.HIPPO_TASK_QUEUES),
-          pollIntervalMs: runtime.config.HIPPO_POLL_INTERVAL_MS,
-          leaseMs: runtime.config.HIPPO_LEASE_MS,
-          listenForWakeups: (onWake) => runtime.notifier.listen(() => onWake()),
-          onError: (error) => app.log.error(error),
-          tracer: runtime.tracer,
-        })
-        const stopRecovery = startRecoveryLoop({
-          intervalMs: runtime.config.HIPPO_RECOVERY_INTERVAL_MS,
-          limit: 100,
-          metrics: runtime.metrics,
-          onError: (error) => app.log.error(error),
-          store: runtime.store,
-          tracer: runtime.tracer,
-        })
-        const stopScheduler = startScheduleLoop({
-          engine: runtime.engine,
-          intervalMs: runtime.config.HIPPO_SCHEDULE_INTERVAL_MS,
-          limit: 100,
-          onError: (error) => app.log.error(error),
-          store: runtime.store,
-          tracer: runtime.tracer,
-        })
-        const stopOutbox = startOutboxLoop({
-          handlers: {},
-          intervalMs: runtime.config.HIPPO_OUTBOX_INTERVAL_MS,
-          limit: 100,
-          onError: (error, record) => app.log.error({ error, record }),
-          store: runtime.store,
-          tracer: runtime.tracer,
-        })
-        const shutdown = async () => {
-          deps.stdout.log("Shutting down Hippo API server & worker loops...")
-          await stopWorker()
-          await stopRecovery()
-          await stopScheduler()
-          await stopOutbox()
-          await app.close()
-          await closeSql(runtime.sql)
-          deps.exit(0)
-        }
-
-        process.on("SIGINT", () => void shutdown())
-        process.on("SIGTERM", () => void shutdown())
-        await app.listen({
-          host: runtime.config.HIPPO_HOST,
-          port: runtime.config.HIPPO_PORT,
-        })
-      } catch (error) {
-        deps.stderr.error("Server bootstrap failed:", error)
-        deps.exit(1)
-      }
-    })
+  addRoleCommand({
+    name: "serve",
+    role: "serve",
+    description: "Start only the API server and dashboard",
+  })
+  addRoleCommand({
+    name: "work",
+    role: "work",
+    description: "Start only background execution loops",
+    alias: "worker",
+  })
+  addRoleCommand({
+    name: "all",
+    role: "all",
+    description: "Start both the API server and background loops",
+    alias: "server",
+  })
 
   const runsCmd = program
     .command("runs")
