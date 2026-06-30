@@ -1,5 +1,5 @@
 import { z } from "zod"
-import { defineWorkflow, task, signal, end } from "@hippo/sdk"
+import { defineWorkflow, task, signal, end } from "pygmyhippo-sdk"
 
 const approvalInputSchema = z.object({
   documentId: z.string(),

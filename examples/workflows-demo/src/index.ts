@@ -7,7 +7,7 @@ import {
   createWorkflowNotifier,
   createWorkflowStore,
   createWorkflowEngine,
-} from "@hippo/core"
+} from "pygmyhippo-core"
 
 import {
   createApp,
@@ -18,7 +18,7 @@ import {
   startRecoveryLoop,
   startScheduleLoop,
   startOutboxLoop,
-} from "@hippo/server"
+} from "pygmyhippo-server"
 
 import { orderFulfillmentWorkflow } from "./workflows/order-fulfillment.js"
 import { webhookCallbackWorkflow } from "./workflows/webhook-callback.js"

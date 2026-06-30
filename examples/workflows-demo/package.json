@@ -1,5 +1,5 @@
 {
-  "name": "@hippo-examples/workflows-demo",
+  "name": "pygmyhippo-examples-workflows-demo",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -9,9 +9,9 @@
     "build": "tsc"
   },
   "dependencies": {
-    "@hippo/core": "0.1.0",
-    "@hippo/sdk": "0.1.0",
-    "@hippo/server": "0.1.0",
+    "pygmyhippo-core": "0.1.0",
+    "pygmyhippo-sdk": "0.1.0",
+    "pygmyhippo-server": "0.1.0",
     "pg": "8.16.3",
     "zod": "4.1.5"
   },

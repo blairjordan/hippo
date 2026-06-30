@@ -1,5 +1,5 @@
 import { z } from "zod"
-import { defineWorkflow, task, end } from "@hippo/sdk"
+import { defineWorkflow, task, end } from "pygmyhippo-sdk"
 
 const orderInputSchema = z.object({
   orderId: z.string(),

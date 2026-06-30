@@ -1,5 +1,5 @@
 import { z } from "zod"
-import { defineWorkflow, task, wait, end } from "@hippo/sdk"
+import { defineWorkflow, task, wait, end } from "pygmyhippo-sdk"
 
 const webhookInputSchema = z.object({
   requestId: z.string(),

@@ -1,5 +1,5 @@
 import { z } from "zod"
-import { defineWorkflow, end, externalSession } from "@hippo/sdk"
+import { defineWorkflow, end, externalSession } from "pygmyhippo-sdk"
 
 const videoTranscodeInputSchema = z.object({
   assetId: z.string(),

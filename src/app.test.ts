@@ -851,6 +851,133 @@ describe("app routes", () => {
     await operatorApp.close()
   })
 
+  it("paginates operator active runs with cursor", async () => {
+    const newer = createRunRecord({
+      id: "11111111-1111-4111-8111-aaaaaaaaaaaa",
+      status: "running",
+    })
+    const older = createRunRecord({
+      id: "11111111-1111-4111-8111-bbbbbbbbbbbb",
+      status: "running",
+      updatedAt: new Date(newer.updatedAt.getTime() - 1000),
+    })
+    let capturedArgs: {
+      limit: number
+      afterUpdatedAt?: Date
+      afterId?: string
+    } | null = null
+    const store = {
+      ...createStoreStub(),
+      async listActiveRuns(input: {
+        limit: number
+        afterUpdatedAt?: Date
+        afterId?: string
+      }) {
+        capturedArgs = input
+        if (!input.afterUpdatedAt) {
+          return [newer, older].slice(0, input.limit)
+        }
+        return []
+      },
+    }
+    const activeApp = createApp({
+      auth: createAuth(),
+      engine: createWorkflowEngine({
+        definitions: [demoWorkflow],
+        metrics: createMetrics(),
+        store,
+      }),
+      metrics: createMetrics(),
+      store,
+    })
+
+    const first = await activeApp.inject({
+      method: "GET",
+      url: "/v1/operators/runs/active?limit=1",
+    })
+    expect(first.statusCode).toBe(200)
+    const firstBody = first.json()
+    expect(firstBody.runs).toHaveLength(1)
+    expect(firstBody.runs[0].id).toBe(newer.id)
+    expect(firstBody.nextCursor).toMatchObject({ afterId: newer.id })
+    expect(capturedArgs).toMatchObject({ limit: 2 })
+
+    const next = await activeApp.inject({
+      method: "GET",
+      url: `/v1/operators/runs/active?limit=1&afterUpdatedAt=${encodeURIComponent(firstBody.nextCursor.afterUpdatedAt)}&afterId=${firstBody.nextCursor.afterId}`,
+    })
+    expect(next.statusCode).toBe(200)
+    expect(next.json()).toEqual({ runs: [], nextCursor: null })
+    expect(capturedArgs).toMatchObject({
+      limit: 2,
+      afterId: newer.id,
+    })
+
+    await activeApp.close()
+  })
+
+  it("includes workflow projections on run detail", async () => {
+    const projectionWorkflow = defineWorkflow({
+      name: "projectable-workflow",
+      version: 1,
+      startAt: "first",
+      steps: {
+        first: taskStep({
+          kind: "task",
+          run: () => ({}),
+          next: "end",
+        }),
+        end: endStep(),
+      },
+      queries: {
+        summary: (context) => ({
+          customerId: context.customerId ?? null,
+          orderTotal: context.orderTotal ?? 0,
+        }),
+        explode: () => {
+          throw new Error("intentional projection failure")
+        },
+      },
+    })
+
+    const run = createRunRecord({
+      id: "11111111-1111-4111-8111-cccccccccccc",
+      definitionName: "projectable-workflow",
+      definitionVersion: 1,
+      context: { customerId: "cust-9", orderTotal: 42 },
+    })
+    const store = {
+      ...createStoreStub(),
+      async getRun() {
+        return run
+      },
+    }
+    const projectionApp = createApp({
+      auth: createAuth(),
+      engine: createWorkflowEngine({
+        definitions: [projectionWorkflow],
+        metrics: createMetrics(),
+        store,
+      }),
+      metrics: createMetrics(),
+      store,
+    })
+
+    const response = await projectionApp.inject({
+      method: "GET",
+      url: `/v1/runs/${run.id}`,
+    })
+
+    expect(response.statusCode).toBe(200)
+    const body = response.json()
+    expect(body.projections).toEqual({
+      summary: { result: { customerId: "cust-9", orderTotal: 42 } },
+      explode: { error: "intentional projection failure" },
+    })
+
+    await projectionApp.close()
+  })
+
   it("returns run lineage for operator inspection", async () => {
     const store = {
       ...createStoreStub(),

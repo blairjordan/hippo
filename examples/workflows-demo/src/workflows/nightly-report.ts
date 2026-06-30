@@ -1,5 +1,5 @@
 import { z } from "zod"
-import { defineWorkflow, task, end } from "@hippo/sdk"
+import { defineWorkflow, task, end } from "pygmyhippo-sdk"
 
 const reportInputSchema = z.object({
   reportDate: z.string().optional(),

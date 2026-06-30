@@ -1,6 +1,6 @@
 # Hippo Workflows Demo
 
-This example demonstrates production-ready durable workflows built using Hippo's workspace packages (`@hippo/sdk`, `@hippo/core`, `@hippo/server`).
+This example demonstrates production-ready durable workflows built using Hippo's published packages (`pygmyhippo-sdk`, `pygmyhippo-core`, `pygmyhippo-server`).
 
 ## Features Demonstrated
 
