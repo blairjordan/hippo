@@ -129,6 +129,8 @@ export const createWorkflowStore = (
     listRuns: operatorQueries.listRuns,
     listRunsPaginated: operatorQueries.listRunsPaginated,
     listSchedules: schedules.listSchedules,
+    deleteSchedule: schedules.deleteSchedule,
+    updateScheduleActive: schedules.updateScheduleActive,
     listStuckRuns: operatorQueries.listStuckRuns,
     markOutboxDelivered: outbox.markOutboxDelivered,
     markRunCompensationFailed: runs.markRunCompensationFailed,

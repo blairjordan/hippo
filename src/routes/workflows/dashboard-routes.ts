@@ -4,6 +4,7 @@ import type { FastifyInstance } from "fastify"
 import { z } from "zod"
 
 import { renderWorkflowAsMermaid } from "../../lib/workflow-definition.js"
+import { computeNextScheduleFireAt } from "../../lib/scheduler.js"
 import {
   RUNS_PAGE_SIZE,
   createWorkflowStepActions,
@@ -16,6 +17,7 @@ import {
   renderRunsIndexDocument,
   renderUsageCard,
   resolveStatusFilter,
+  renderSchedulesIndexDocument,
 } from "../dashboard.js"
 import { optionalQueryText, runIdParamsSchema } from "./schemas.js"
 import {
@@ -276,6 +278,180 @@ export const registerDashboardRoutes = (
 
         reply.header("content-type", "text/html; charset=utf-8")
         return document
+      },
+    })
+  })
+
+  app.get("/dashboard/schedules", async (request, reply) => {
+    await requireApiAuth(app, request, args.auth, args.tracer)
+    return traceAuthedRequest({
+      app,
+      auth: args.auth,
+      request,
+      tracer: args.tracer,
+      trace: {
+        name: "hippo.http.dashboard_schedules",
+        attributes: createRouteTraceAttributes({
+          method: request.method,
+          operation: "http.dashboard_schedules",
+          route: "/dashboard/schedules",
+        }),
+      },
+      run: async () => {
+        const schedules = await args.store.listSchedules()
+        const workflows = args.engine.listWorkflows().map((w) => ({
+          name: w.name,
+          ...(w.title === undefined ? {} : { title: w.title }),
+        }))
+        const html = renderSchedulesIndexDocument({
+          schedules,
+          workflows,
+        })
+        reply.header("content-type", "text/html; charset=utf-8")
+        return html
+      },
+    })
+  })
+
+  app.post("/dashboard/schedules", async (request, reply) => {
+    await requireApiAuth(app, request, args.auth, args.tracer)
+    return traceAuthedRequest({
+      app,
+      auth: args.auth,
+      request,
+      tracer: args.tracer,
+      trace: {
+        name: "hippo.http.dashboard_create_schedule",
+        attributes: createRouteTraceAttributes({
+          method: request.method,
+          operation: "http.dashboard_create_schedule",
+          route: "/dashboard/schedules",
+        }),
+      },
+      run: async () => {
+        const body = request.body as Record<string, string | undefined>
+        const workflowName = body.workflowName ?? ""
+        const cronExpression = body.cronExpression ?? ""
+        const taskQueue = body.taskQueue || "default"
+        const priority = parseInt(body.priority || "0", 10)
+        let payload = {}
+        if (body.payload) {
+          try {
+            payload = JSON.parse(body.payload)
+          } catch {
+            // ignore/fallback
+          }
+        }
+
+        if (!args.engine.hasWorkflow(workflowName)) {
+          throw app.httpErrors.notFound(`Workflow "${workflowName}" is not registered`)
+        }
+
+        await args.store.createSchedule({
+          workflowName,
+          cronExpression,
+          taskQueue,
+          priority,
+          payload,
+          nextFireAt: computeNextScheduleFireAt({ cronExpression }),
+        })
+
+        reply.redirect("/dashboard/schedules")
+      },
+    })
+  })
+
+  app.post("/dashboard/schedules/:scheduleId/pause", async (request, reply) => {
+    await requireApiAuth(app, request, args.auth, args.tracer)
+    return traceAuthedRequest({
+      app,
+      auth: args.auth,
+      request,
+      tracer: args.tracer,
+      trace: {
+        name: "hippo.http.dashboard_pause_schedule",
+        attributes: createRouteTraceAttributes({
+          method: request.method,
+          operation: "http.dashboard_pause_schedule",
+          route: "/dashboard/schedules/:scheduleId/pause",
+        }),
+      },
+      run: async () => {
+        const params = request.params as { scheduleId: string }
+        const list = await args.store.listSchedules()
+        const schedule = list.find((s) => s.id === params.scheduleId)
+        if (!schedule) {
+          throw app.httpErrors.notFound(`Schedule "${params.scheduleId}" not found`)
+        }
+
+        await args.store.updateScheduleActive({
+          id: params.scheduleId,
+          active: false,
+          nextFireAt: schedule.nextFireAt,
+        })
+
+        reply.redirect("/dashboard/schedules")
+      },
+    })
+  })
+
+  app.post("/dashboard/schedules/:scheduleId/resume", async (request, reply) => {
+    await requireApiAuth(app, request, args.auth, args.tracer)
+    return traceAuthedRequest({
+      app,
+      auth: args.auth,
+      request,
+      tracer: args.tracer,
+      trace: {
+        name: "hippo.http.dashboard_resume_schedule",
+        attributes: createRouteTraceAttributes({
+          method: request.method,
+          operation: "http.dashboard_resume_schedule",
+          route: "/dashboard/schedules/:scheduleId/resume",
+        }),
+      },
+      run: async () => {
+        const params = request.params as { scheduleId: string }
+        const list = await args.store.listSchedules()
+        const schedule = list.find((s) => s.id === params.scheduleId)
+        if (!schedule) {
+          throw app.httpErrors.notFound(`Schedule "${params.scheduleId}" not found`)
+        }
+
+        const nextFireAt = computeNextScheduleFireAt({
+          cronExpression: schedule.cronExpression,
+        })
+
+        await args.store.updateScheduleActive({
+          id: params.scheduleId,
+          active: true,
+          nextFireAt,
+        })
+
+        reply.redirect("/dashboard/schedules")
+      },
+    })
+  })
+
+  app.post("/dashboard/schedules/:scheduleId/delete", async (request, reply) => {
+    await requireApiAuth(app, request, args.auth, args.tracer)
+    return traceAuthedRequest({
+      app,
+      auth: args.auth,
+      request,
+      tracer: args.tracer,
+      trace: {
+        name: "hippo.http.dashboard_delete_schedule",
+        attributes: createRouteTraceAttributes({
+          method: request.method,
+          operation: "http.dashboard_delete_schedule",
+          route: "/dashboard/schedules/:scheduleId/delete",
+        }),
+      },
+      run: async () => {
+        const params = request.params as { scheduleId: string }
+        await args.store.deleteSchedule(params.scheduleId)
+        reply.redirect("/dashboard/schedules")
       },
     })
   })

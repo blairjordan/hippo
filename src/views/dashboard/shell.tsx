@@ -28,7 +28,7 @@ export const statusToneByRun = {
   canceled: "tone-canceled",
 } as const
 
-export type SidebarNavId = "runs" | "definitions"
+export type SidebarNavId = "runs" | "definitions" | "schedules"
 
 export const renderSidebar = (activeNav: SidebarNavId | null) => {
   const item = (id: SidebarNavId, href: string, label: string) => (
@@ -53,6 +53,10 @@ export const renderSidebar = (activeNav: SidebarNavId | null) => {
       <div class="sidebar-section">
         <div class="sidebar-heading">Catalog</div>
         {item("definitions", "/dashboard/definitions", "Definitions")}
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-heading">Orchestration</div>
+        {item("schedules", "/dashboard/schedules", "Schedules")}
       </div>
       <div class="sidebar-foot">
         <button

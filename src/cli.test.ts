@@ -79,6 +79,10 @@ const createHarness = () => {
     getRunAttempts: vi.fn(async () => [testAttempt]),
     listRunsPaginated: vi.fn(async () => [testRun]),
     requestCancelRun: vi.fn(async () => testRun),
+    listSchedules: vi.fn(async () => []),
+    createSchedule: vi.fn(async () => ({}) as any),
+    updateScheduleActive: vi.fn(async () => ({}) as any),
+    deleteSchedule: vi.fn(async () => undefined),
   }
   const deps = {
     cwd: () => "/workspace",

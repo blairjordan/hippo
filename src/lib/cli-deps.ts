@@ -18,7 +18,14 @@ import type { HippoProcessRole } from "./process-role.js"
 
 export type CliStore = Pick<
   WorkflowStore,
-  "getRun" | "getRunAttempts" | "listRunsPaginated" | "requestCancelRun"
+  | "getRun"
+  | "getRunAttempts"
+  | "listRunsPaginated"
+  | "requestCancelRun"
+  | "listSchedules"
+  | "createSchedule"
+  | "updateScheduleActive"
+  | "deleteSchedule"
 >
 
 export type CliSql = {

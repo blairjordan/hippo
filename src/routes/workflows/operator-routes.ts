@@ -2,10 +2,8 @@ import type { FastifyInstance } from "fastify"
 import { z } from "zod"
 
 import { runRecoveryPass } from "../../lib/recovery.js"
-import { computeNextScheduleFireAt } from "../../lib/scheduler.js"
 import {
   cancelRunBodySchema,
-  createScheduleBodySchema,
   forkRunBodySchema,
   operatorListQuerySchema,
   operatorRunsQuerySchema,
@@ -22,6 +20,7 @@ import {
   paginateRuns,
   propagateCancellation,
   traceAuthedRequest,
+  cancelExternalSessionsTree,
   type WorkflowRouteContext,
 } from "./helpers.js"
 
@@ -193,7 +192,11 @@ export const registerOperatorRoutes = (
         }
 
         if (body.mode === "hard") {
-          await args.engine.cancelExternalSessionsForRun(existingRun.id)
+          await cancelExternalSessionsTree({
+            engine: args.engine,
+            runId: existingRun.id,
+            store: args.store,
+          })
         }
 
         const run = await args.store.requestCancelRun({
@@ -255,7 +258,11 @@ export const registerOperatorRoutes = (
           })
           .parse(request.body ?? {})
 
-        await args.engine.cancelExternalSessionsForRun(params.runId)
+        await cancelExternalSessionsTree({
+          engine: args.engine,
+          runId: params.runId,
+          store: args.store,
+        })
 
         const run = await args.store.requestCancelRun({
           runId: params.runId,
@@ -360,6 +367,14 @@ export const registerOperatorRoutes = (
           )
         }
 
+        if (!terminalRunStatuses.has(existingRun.status)) {
+          await cancelExternalSessionsTree({
+            engine: args.engine,
+            runId: existingRun.id,
+            store: args.store,
+          })
+        }
+
         const run = await args.store.branchRun({
           runId: params.runId,
           attemptId: body.toAttemptId,
@@ -452,48 +467,6 @@ export const registerOperatorRoutes = (
 
         return {
           reclaimed,
-        }
-      },
-    })
-  })
-
-  app.post("/v1/operators/schedules", async (request, reply) => {
-    return traceAuthedRequest({
-      app,
-      auth: args.auth,
-      request,
-      tracer: args.tracer,
-      trace: {
-        name: "hippo.http.create_schedule",
-        attributes: createRouteTraceAttributes({
-          method: request.method,
-          operation: "http.create_schedule",
-          route: "/v1/operators/schedules",
-        }),
-      },
-      run: async () => {
-        const body = createScheduleBodySchema.parse(request.body ?? {})
-
-        if (!args.engine.hasWorkflow(body.workflowName)) {
-          throw app.httpErrors.notFound(
-            `Workflow "${body.workflowName}" is not registered`
-          )
-        }
-
-        const schedule = await args.store.createSchedule({
-          workflowName: body.workflowName,
-          cronExpression: body.cronExpression,
-          payload: body.payload,
-          taskQueue: body.taskQueue,
-          priority: body.priority,
-          nextFireAt: computeNextScheduleFireAt({
-            cronExpression: body.cronExpression,
-          }),
-        })
-
-        reply.code(201)
-        return {
-          schedule,
         }
       },
     })

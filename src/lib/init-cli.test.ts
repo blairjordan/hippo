@@ -33,14 +33,30 @@ describe("hippo init cli", () => {
     )
     const readme = await readFile(path.join(projectDir, "README.md"), "utf8")
 
+    const envFile = await readFile(path.join(projectDir, ".env"), "utf8")
+    const envExampleFile = await readFile(path.join(projectDir, ".env.example"), "utf8")
+
     expect(packageJson.name).toBe("demo-app")
     expect(packageJson.scripts["hippo:dev"]).toBe("tsx scripts/hippo-dev.ts")
     expect(packageJson.scripts["render:example"]).toBe(
       "tsx scripts/render-example.ts"
     )
+    expect(packageJson.scripts["start"]).toBeDefined()
+    expect(packageJson.scripts["dev"]).toBeDefined()
+    expect(packageJson.scripts["build"]).toBeDefined()
+
     expect(workflowIndex).toContain("exampleWorkflow")
     expect(workflowFile).toContain('name: "example-delivery"')
+    expect(workflowFile).toContain('import {')
+    expect(workflowFile).toContain('"../lib/workflow-definition.js"')
+
     expect(readme).toContain("hippo init")
+    expect(readme).toContain("npm install")
+    expect(readme).toContain("npm run hippo:dev")
+    expect(readme).toContain("curl -X POST")
+
+    expect(envFile).toContain("DATABASE_URL=")
+    expect(envExampleFile).toContain("DATABASE_URL=")
 
     // Link node_modules from repo root to the scaffolded project to resolve dependencies locally
     await symlink(

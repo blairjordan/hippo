@@ -1,4 +1,4 @@
-import { cp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { cp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -21,17 +21,9 @@ const packages = [
     },
     artifacts: [
       "src/core",
-      "src/lib/db",
-      "src/lib/metrics",
-      "src/lib/notifier",
-      "src/lib/tracing",
-      "src/lib/workflow-engine",
-      "src/lib/workflow-store",
-      "src/lib/migration-runner",
-      "src/lib/migrations",
-      "src/queries/workflow-store.queries",
-      "src/types/json",
-      "src/types/workflow",
+      "src/lib",
+      "src/queries",
+      "src/types",
     ],
   },
   {
@@ -61,22 +53,15 @@ const packages = [
     artifacts: [
       "src/app",
       "src/server",
-      "src/lib/auth",
-      "src/lib/config",
-      "src/lib/metrics",
-      "src/lib/notifier",
-      "src/lib/outbox",
-      "src/lib/recovery",
-      "src/lib/scheduler",
-      "src/lib/tracing",
-      "src/lib/worker",
-      "src/lib/workflow-definition",
+      "src/lib",
       "src/routes/dashboard",
       "src/routes/health",
+      "src/routes/human-tasks",
       "src/routes/metrics",
       "src/routes/workflows",
-      "src/types/json",
-      "src/types/workflow",
+      "src/queries",
+      "src/types",
+      "src/views/dashboard",
     ],
   },
   {
@@ -99,29 +84,15 @@ const packages = [
       "src/cli",
       "src/app",
       "src/server",
-      "src/lib/auth",
-      "src/lib/config",
-      "src/lib/db",
-      "src/lib/metrics",
-      "src/lib/notifier",
-      "src/lib/outbox",
-      "src/lib/recovery",
-      "src/lib/scheduler",
-      "src/lib/tracing",
-      "src/lib/worker",
-      "src/lib/workflow-definition",
-      "src/lib/workflow-engine",
-      "src/lib/workflow-store",
-      "src/lib/workflow-loader",
-      "src/lib/migration-runner",
-      "src/lib/migrations",
+      "src/lib",
       "src/routes/dashboard",
       "src/routes/health",
+      "src/routes/human-tasks",
       "src/routes/metrics",
       "src/routes/workflows",
-      "src/types/json",
-      "src/types/workflow",
-      "src/queries/workflow-store.queries",
+      "src/queries",
+      "src/types",
+      "src/views/dashboard",
     ],
   },
 ]
@@ -144,6 +115,31 @@ package manifest can be smoke-tested locally before any publish step is added.
 const artifactSuffixes = [".js", ".d.ts", ".js.map", ".d.ts.map"]
 
 const copyArtifact = async (relativeStem, destinationRoot) => {
+  const dirPath = path.join(repoRoot, "dist", relativeStem)
+  try {
+    const dirStat = await stat(dirPath)
+    if (dirStat.isDirectory()) {
+      const copyDir = async (srcDir, destDir) => {
+        await mkdir(destDir, { recursive: true })
+        const entries = await readdir(srcDir, { withFileTypes: true })
+        for (const entry of entries) {
+          const srcPath = path.join(srcDir, entry.name)
+          const destPath = path.join(destDir, entry.name)
+          if (entry.isDirectory()) {
+            await copyDir(srcPath, destPath)
+          } else {
+            await cp(srcPath, destPath)
+          }
+        }
+      }
+      await copyDir(dirPath, path.join(destinationRoot, relativeStem))
+    }
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code !== "ENOENT") {
+      throw error
+    }
+  }
+
   for (const suffix of artifactSuffixes) {
     const sourcePath = path.join(repoRoot, "dist", `${relativeStem}${suffix}`)
 

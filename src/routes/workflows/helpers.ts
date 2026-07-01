@@ -213,6 +213,24 @@ export const propagateCancellation = async (args: {
   }
 }
 
+export const cancelExternalSessionsTree = async (args: {
+  engine: WorkflowEngine
+  runId: string
+  store: WorkflowStore
+}) => {
+  await args.engine.cancelExternalSessionsForRun(args.runId)
+  const childRuns = await args.store.listChildRuns(args.runId)
+
+  for (const childRun of childRuns) {
+    await cancelExternalSessionsTree({
+      engine: args.engine,
+      runId: childRun.id,
+      store: args.store,
+    })
+  }
+}
+
+
 export const compensateRunTree = async (args: {
   engine: WorkflowEngine
   runId: string

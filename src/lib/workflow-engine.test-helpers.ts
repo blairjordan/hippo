@@ -779,6 +779,12 @@ export const createStoreStub = () => {
     async listSchedules() {
       return []
     },
+    async deleteSchedule() {
+      // not used
+    },
+    async updateScheduleActive() {
+      throw new Error("not used")
+    },
     async listStuckRuns() {
       return []
     },

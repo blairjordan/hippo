@@ -3,6 +3,8 @@ import path from "node:path"
 import process from "node:process"
 import { pathToFileURL } from "node:url"
 
+import { computeNextScheduleFireAt } from "./lib/scheduler.js"
+
 import {
   createDefaultCliDeps,
   defaultWorkflowPath,
@@ -360,6 +362,164 @@ export const createHippoCli = (inputDeps: Partial<CliDeps> = {}) => {
     })
 
   addRenderCommand(workflowsCmd)
+
+  const schedulesCmd = program
+    .command("schedules")
+    .description("Manage cron schedules")
+
+  schedulesCmd
+    .command("list")
+    .alias("ls")
+    .description("List all schedules")
+    .action(async () => {
+      try {
+        await runStoreCommand(deps, async (store) => {
+          const list = await store.listSchedules()
+
+          if (list.length === 0) {
+            deps.stdout.log("No schedules registered.")
+            return
+          }
+
+          deps.stdout.log(
+            `${"SCHEDULE ID".padEnd(36)} | ${"WORKFLOW".padEnd(20)} | ${"CRON".padEnd(15)} | ${"ACTIVE".padEnd(6)} | NEXT FIRE`
+          )
+          deps.stdout.log("-".repeat(105))
+
+          for (const s of list) {
+            deps.stdout.log(
+              `${s.id} | ${s.workflowName.padEnd(20).slice(0, 20)} | ${s.cronExpression.padEnd(15).slice(0, 15)} | ${String(s.active).padEnd(6)} | ${s.nextFireAt.toLocaleString()}`
+            )
+          }
+        })
+      } catch (error) {
+        deps.stderr.error("Failed to list schedules:", error)
+        deps.exit(1)
+      }
+    })
+
+  schedulesCmd
+    .command("create")
+    .description("Create a new cron schedule")
+    .requiredOption("--workflow <name>", "Name of the workflow to run")
+    .requiredOption("--cron <expr>", "Cron expression")
+    .option("--queue <queue>", "Task queue", "default")
+    .option("--priority <number>", "Priority", "0")
+    .option("--payload <json>", "JSON payload", "{}")
+    .action(
+      async (options: {
+        workflow: string
+        cron: string
+        queue: string
+        priority: string
+        payload: string
+      }) => {
+        try {
+          let parsedPayload = {}
+          try {
+            parsedPayload = JSON.parse(options.payload)
+          } catch {
+            deps.stderr.error("Error: --payload must be a valid JSON string.")
+            deps.exit(1)
+            throw new Error("unreachable")
+          }
+
+          const nextFireAt = computeNextScheduleFireAt({
+            cronExpression: options.cron,
+          })
+
+          await runStoreCommand(deps, async (store) => {
+            const schedule = await store.createSchedule({
+              workflowName: options.workflow,
+              cronExpression: options.cron,
+              payload: parsedPayload,
+              taskQueue: options.queue,
+              priority: parseInt(options.priority, 10),
+              nextFireAt,
+            })
+
+            deps.stdout.log(`Schedule created successfully with ID: ${schedule.id}`)
+          })
+        } catch (error) {
+          deps.stderr.error("Failed to create schedule:", error)
+          deps.exit(1)
+        }
+      }
+    )
+
+  schedulesCmd
+    .command("pause <scheduleId>")
+    .description("Pause a cron schedule")
+    .action(async (scheduleId: string) => {
+      try {
+        await runStoreCommand(deps, async (store) => {
+          const list = await store.listSchedules()
+          const schedule = list.find((s) => s.id === scheduleId)
+          if (!schedule) {
+            deps.stderr.error(`Error: Schedule "${scheduleId}" not found.`)
+            deps.exit(1)
+            throw new Error("unreachable")
+          }
+
+          await store.updateScheduleActive({
+            id: scheduleId,
+            active: false,
+            nextFireAt: schedule.nextFireAt,
+          })
+          deps.stdout.log(`Schedule ${scheduleId} paused.`)
+        })
+      } catch (error) {
+        deps.stderr.error("Failed to pause schedule:", error)
+        deps.exit(1)
+      }
+    })
+
+  schedulesCmd
+    .command("resume <scheduleId>")
+    .description("Resume a paused cron schedule")
+    .action(async (scheduleId: string) => {
+      try {
+        await runStoreCommand(deps, async (store) => {
+          const list = await store.listSchedules()
+          const schedule = list.find((s) => s.id === scheduleId)
+          if (!schedule) {
+            deps.stderr.error(`Error: Schedule "${scheduleId}" not found.`)
+            deps.exit(1)
+            throw new Error("unreachable")
+          }
+
+          const nextFireAt = computeNextScheduleFireAt({
+            cronExpression: schedule.cronExpression,
+          })
+
+          await store.updateScheduleActive({
+            id: scheduleId,
+            active: true,
+            nextFireAt,
+          })
+          deps.stdout.log(`Schedule ${scheduleId} resumed.`)
+        })
+      } catch (error) {
+        deps.stderr.error("Failed to resume schedule:", error)
+        deps.exit(1)
+      }
+    })
+
+  schedulesCmd
+    .command("delete <scheduleId>")
+    .alias("rm")
+    .description("Delete a cron schedule")
+    .action(async (scheduleId: string) => {
+      try {
+        await runStoreCommand(deps, async (store) => {
+          await store.deleteSchedule(scheduleId)
+          deps.stdout.log(`Schedule ${scheduleId} deleted.`)
+        })
+      } catch (error) {
+        deps.stderr.error("Failed to delete schedule:", error)
+        deps.exit(1)
+      }
+    })
 
   return program
 }

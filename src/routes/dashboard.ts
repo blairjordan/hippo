@@ -14,3 +14,6 @@ export {
   renderDefinitionDetailDocument,
   createWorkflowStepActions,
 } from "../views/dashboard/definitions.js"
+export {
+  renderSchedulesIndexDocument,
+} from "../views/dashboard/schedules.js"

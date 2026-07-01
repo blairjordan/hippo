@@ -175,3 +175,8 @@ export const terminalRunStatuses = new Set([
   "exhausted_budget",
   "canceled",
 ])
+
+export const scheduleIdParamsSchema = z.object({
+  scheduleId: z.string().uuid(),
+})
+

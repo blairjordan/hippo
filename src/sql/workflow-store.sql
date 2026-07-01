@@ -2486,6 +2486,30 @@ SET
   updated_at = now()
 WHERE id = :id;
 
+/* @name DeleteSchedule */
+DELETE FROM workflow_schedules
+WHERE id = :id;
+
+/* @name UpdateScheduleActive */
+UPDATE workflow_schedules
+SET
+  active = :active,
+  next_fire_at = :nextFireAt,
+  updated_at = now()
+WHERE id = :id
+RETURNING
+  id,
+  workflow_name AS "workflowName",
+  cron_expression AS "cronExpression",
+  payload,
+  task_queue AS "taskQueue",
+  priority,
+  active,
+  next_fire_at AS "nextFireAt",
+  created_at AS "createdAt",
+  updated_at AS "updatedAt";
+
+
 /* @name CompleteTransactionalTask */
 WITH updated_run AS (
   UPDATE workflow_runs

@@ -25,4 +25,40 @@ describe.skipIf(!testDatabaseUrl)("workflow store postgres integration - schedul
     const list = await store.listSchedules()
     expect(list.some((s) => s.id === schedule.id)).toBe(true)
   })
+
+  it("deletes and toggles active status on schedules in postgres", async () => {
+    const store = getStore()
+    const nextFireAt = new Date(Date.now() + 60_000)
+    const schedule = await store.createSchedule({
+      workflowName: "test-workflow",
+      cronExpression: "*/10 * * * *",
+      payload: {},
+      taskQueue: "default",
+      priority: 0,
+      nextFireAt,
+    })
+
+    expect(schedule.active).toBe(true)
+
+    // Pause schedule
+    const paused = await store.updateScheduleActive({
+      id: schedule.id,
+      active: false,
+      nextFireAt,
+    })
+    expect(paused.active).toBe(false)
+
+    // Resume schedule
+    const resumed = await store.updateScheduleActive({
+      id: schedule.id,
+      active: true,
+      nextFireAt,
+    })
+    expect(resumed.active).toBe(true)
+
+    // Delete schedule
+    await store.deleteSchedule(schedule.id)
+    const list = await store.listSchedules()
+    expect(list.some((s) => s.id === schedule.id)).toBe(false)
+  })
 })

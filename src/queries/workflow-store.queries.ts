@@ -5374,6 +5374,86 @@ const rescheduleAfterFireIR: any = {"usedParamSet":{"nextFireAt":true,"id":true}
 export const rescheduleAfterFire = new PreparedQuery<IRescheduleAfterFireParams,IRescheduleAfterFireResult>(rescheduleAfterFireIR);
 
 
+/** 'DeleteSchedule' parameters type */
+export interface IDeleteScheduleParams {
+  id?: string | null | void;
+}
+
+/** 'DeleteSchedule' return type */
+export type IDeleteScheduleResult = void;
+
+/** 'DeleteSchedule' query type */
+export interface IDeleteScheduleQuery {
+  params: IDeleteScheduleParams;
+  result: IDeleteScheduleResult;
+}
+
+const deleteScheduleIR: any = {"usedParamSet":{"id":true},"params":[{"name":"id","required":false,"transform":{"type":"scalar"},"locs":[{"a":42,"b":44}]}],"statement":"DELETE FROM workflow_schedules\nWHERE id = :id"};
+
+/**
+ * Query generated from SQL:
+ * ```
+ * DELETE FROM workflow_schedules
+ * WHERE id = :id
+ * ```
+ */
+export const deleteSchedule = new PreparedQuery<IDeleteScheduleParams,IDeleteScheduleResult>(deleteScheduleIR);
+
+
+/** 'UpdateScheduleActive' parameters type */
+export interface IUpdateScheduleActiveParams {
+  active?: boolean | null | void;
+  id?: string | null | void;
+  nextFireAt?: DateOrString | null | void;
+}
+
+/** 'UpdateScheduleActive' return type */
+export interface IUpdateScheduleActiveResult {
+  active: boolean;
+  createdAt: Date;
+  cronExpression: string;
+  id: string;
+  nextFireAt: Date;
+  payload: Json;
+  priority: number;
+  taskQueue: string;
+  updatedAt: Date;
+  workflowName: string;
+}
+
+/** 'UpdateScheduleActive' query type */
+export interface IUpdateScheduleActiveQuery {
+  params: IUpdateScheduleActiveParams;
+  result: IUpdateScheduleActiveResult;
+}
+
+const updateScheduleActiveIR: any = {"usedParamSet":{"active":true,"nextFireAt":true,"id":true},"params":[{"name":"active","required":false,"transform":{"type":"scalar"},"locs":[{"a":41,"b":47}]},{"name":"nextFireAt","required":false,"transform":{"type":"scalar"},"locs":[{"a":67,"b":77}]},{"name":"id","required":false,"transform":{"type":"scalar"},"locs":[{"a":112,"b":114}]}],"statement":"UPDATE workflow_schedules\nSET\n  active = :active,\n  next_fire_at = :nextFireAt,\n  updated_at = now()\nWHERE id = :id\nRETURNING\n  id,\n  workflow_name AS \"workflowName\",\n  cron_expression AS \"cronExpression\",\n  payload,\n  task_queue AS \"taskQueue\",\n  priority,\n  active,\n  next_fire_at AS \"nextFireAt\",\n  created_at AS \"createdAt\",\n  updated_at AS \"updatedAt\""};
+
+/**
+ * Query generated from SQL:
+ * ```
+ * UPDATE workflow_schedules
+ * SET
+ *   active = :active,
+ *   next_fire_at = :nextFireAt,
+ *   updated_at = now()
+ * WHERE id = :id
+ * RETURNING
+ *   id,
+ *   workflow_name AS "workflowName",
+ *   cron_expression AS "cronExpression",
+ *   payload,
+ *   task_queue AS "taskQueue",
+ *   priority,
+ *   active,
+ *   next_fire_at AS "nextFireAt",
+ *   created_at AS "createdAt",
+ *   updated_at AS "updatedAt"
+ * ```
+ */
+export const updateScheduleActive = new PreparedQuery<IUpdateScheduleActiveParams,IUpdateScheduleActiveResult>(updateScheduleActiveIR);
+
+
 /** 'CompleteTransactionalTask' parameters type */
 export interface ICompleteTransactionalTaskParams {
   attemptId?: string | null | void;

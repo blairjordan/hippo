@@ -69,6 +69,7 @@ import {
 } from "./workflows/helpers.js"
 import { registerDashboardRoutes } from "./workflows/dashboard-routes.js"
 import { registerOperatorRoutes } from "./workflows/operator-routes.js"
+import { registerSchedulesOperatorRoutes } from "./workflows/schedules-operator-routes.js"
 import { registerCallbackRoutes } from "./workflows/callback-routes.js"
 
 
@@ -85,6 +86,7 @@ export const createWorkflowRoutes = (args: {
 }): FastifyPluginAsync => async (app) => {
   registerDashboardRoutes(app, args)
   registerOperatorRoutes(app, args)
+  registerSchedulesOperatorRoutes(app, args)
   registerCallbackRoutes(app, args)
 
   app.post("/v1/workflows/:workflowName/runs", async (request, reply) => {

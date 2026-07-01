@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import {
   defineWorkflow,
   endStep,
   taskStep,
   childStep,
+  externalSession,
 } from "./workflow-definition.js"
 import { createMetrics } from "./metrics.js"
 import { createWorkflowEngine } from "./workflow-engine.js"
@@ -255,5 +256,136 @@ describe.skipIf(!testDatabaseUrl)("workflow store postgres integration - lineage
     expect(lineage.map((run) => run.id)).toContain(sourceRun.id)
     expect(lineage.map((run) => run.id)).toContain(forkedRun.id)
     expect(lineage.map((run) => run.id)).not.toContain(childRun.id)
+  })
+
+  it("rewinds a non-terminal parent run and cancels active child run external sessions recursively", async () => {
+    const store = getStore()
+    const cancelFn = vi.fn()
+
+    const childWorkflow = defineWorkflow({
+      name: "ext-child",
+      version: 1,
+      startAt: "waitStep",
+      steps: {
+        waitStep: externalSession({
+          sessionKind: "test-session",
+          timeoutMs: 60000,
+          start: () => ({ externalId: "ext-sess-123" }),
+          resume: () => ({}),
+          cancel: (ctx, externalId) => {
+            cancelFn(externalId)
+          },
+          next: "done",
+        }),
+        done: endStep(),
+      },
+    })
+
+    const parentWorkflow = defineWorkflow({
+      name: "ext-parent",
+      version: 1,
+      startAt: "spawn",
+      steps: {
+        spawn: childStep({
+          kind: "child",
+          workflow: childWorkflow.name,
+          next: "done",
+          input: () => ({}),
+          resume: () => ({}),
+        }),
+        done: endStep(),
+      },
+    })
+
+    const dummyWorkflow = defineWorkflow({
+      name: "lineage-query-example",
+      version: 1,
+      startAt: "first",
+      steps: {
+        first: taskStep({
+          kind: "task",
+          next: "done",
+          run: () => ({}),
+        }),
+        done: endStep(),
+      },
+    })
+
+    const engine = createWorkflowEngine({
+      definitions: [parentWorkflow, childWorkflow, dummyWorkflow],
+      metrics: createMetrics(),
+      store,
+    })
+
+    const parentRun = await engine.startRun({
+      workflowName: parentWorkflow.name,
+      payload: {},
+    })
+
+    // Tick until child run is created and is in waiting status (meaning it opened its wait step)
+    let childRunId: string | undefined
+    let safety = 0
+    while (safety++ < 10) {
+      await engine.tick("test-worker", 15000)
+      if (!childRunId) {
+        const childRuns = await store.listChildRuns(parentRun.id)
+        if (childRuns.length > 0) {
+          childRunId = childRuns[0]!.id
+        }
+      }
+      if (childRunId) {
+        const dbChild = await store.getRun(childRunId)
+        if (dbChild?.status === "waiting") {
+          break
+        }
+      }
+    }
+
+    const childRuns = await store.listChildRuns(parentRun.id)
+    expect(childRuns.length).toBe(1)
+    const childRun = childRuns[0]!
+
+    // Verify child is in waiting status
+    const dbChild = await store.getRun(childRun.id)
+    expect(dbChild?.status).toBe("waiting")
+
+    // Verify there is an open external session wait
+    const waits = await store.listOpenExternalSessions(childRun.id)
+    expect(waits.length).toBe(1)
+    expect(waits[0]!.externalSessionId).toBe("ext-sess-123")
+
+    // Get parent attempts to rewind
+    const parentAttempts = await store.getRunAttempts(parentRun.id)
+    const spawnAttempt = parentAttempts.find((a) => a.stepKey === "spawn")
+    expect(spawnAttempt).toBeDefined()
+
+    const cancelExternalSessionsTree = async (runId: string) => {
+      await engine.cancelExternalSessionsForRun(runId)
+      const children = await store.listChildRuns(runId)
+      for (const child of children) {
+        await cancelExternalSessionsTree(child.id)
+      }
+    }
+
+    await cancelExternalSessionsTree(parentRun.id)
+
+    // Verify that the external session cancel handler was called!
+    expect(cancelFn).toHaveBeenCalledWith("ext-sess-123")
+
+    // Now rewind
+    const rewoundParent = await store.branchRun({
+      runId: parentRun.id,
+      attemptId: spawnAttempt!.id,
+      mode: "rewind",
+    })
+
+    expect(rewoundParent).not.toBeNull()
+
+    // Verify parent run and child runs are canceled
+    const updatedParent = await store.getRun(parentRun.id)
+    expect(updatedParent?.status).toBe("canceled")
+
+    const updatedChild = await store.getRun(childRun.id)
+    expect(updatedChild?.status).toBe("canceled")
   })
 })

@@ -6,6 +6,8 @@ import {
   listSchedules as listSchedulesQuery,
   claimDueSchedules as claimDueSchedulesQuery,
   rescheduleAfterFire as rescheduleAfterFireQuery,
+  deleteSchedule as deleteScheduleQuery,
+  updateScheduleActive as updateScheduleActiveQuery,
 } from "../../queries/workflow-store.queries.js"
 import { mapSchedule, requireRow } from "./mappers.js"
 import { withTransaction } from "../db.js"
@@ -57,6 +59,52 @@ export const createScheduleMethods = (ctx: StoreContext) => {
     return rows.map(mapSchedule)
   }
 
+  const deleteSchedule = async (id: string) =>
+    withStoreSpan(
+      {
+        name: "delete_schedule",
+        attributes: {
+          ...createTraceAttributes({
+            operation: "store.delete_schedule",
+          }),
+          "workflow.schedule.id": id,
+        },
+      },
+      async () => {
+        await deleteScheduleQuery.run({ id }, db)
+      }
+    )
+
+  const updateScheduleActive = async (args: {
+    id: string
+    active: boolean
+    nextFireAt: Date
+  }) =>
+    withStoreSpan(
+      {
+        name: "update_schedule_active",
+        attributes: {
+          ...createTraceAttributes({
+            operation: "store.update_schedule_active",
+          }),
+          "workflow.schedule.id": args.id,
+          "workflow.schedule.active": args.active,
+        },
+      },
+      async () => {
+        const rows = await updateScheduleActiveQuery.run(
+          {
+            id: args.id,
+            active: args.active,
+            nextFireAt: args.nextFireAt,
+          },
+          db
+        )
+
+        return mapSchedule(requireRow(rows[0], "Failed to update schedule status"))
+      }
+    )
+
   const fireDueSchedules = async (args: {
     limit: number
     getNextFireAt: (input: {
@@ -102,6 +150,9 @@ export const createScheduleMethods = (ctx: StoreContext) => {
   return {
     createSchedule,
     listSchedules,
+    deleteSchedule,
+    updateScheduleActive,
     fireDueSchedules,
   }
 }
+
